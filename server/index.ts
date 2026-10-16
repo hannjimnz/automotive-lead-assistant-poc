@@ -9,6 +9,7 @@ import type {
 
 import { SqliteRepository } from "./repository.js";
 import { ApiError, CRMService } from "./service.js";
+import { campaignRoutes } from "./campaigns.js";
 
 const app = express();
 
@@ -19,6 +20,7 @@ const repo = new SqliteRepository(
 const service = new CRMService(repo);
 
 app.use(express.json({ limit: "32kb" }));
+app.use(campaignRoutes(repo));
 
 app.get("/api/health", (_req, res) => {
   res.json({

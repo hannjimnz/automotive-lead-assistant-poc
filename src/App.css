@@ -129,5 +129,14 @@ form label { display: block; font-size: 12px; font-weight: 600; margin-bottom: 7
 @media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; transition: none !important; } }
 
 .header-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.main-nav { flex-wrap: wrap; }
+.demo-shell { max-width: 900px; }
+.campaign-content { padding: 24px; }
+.campaign-link { display: inline-block; text-decoration: none; margin: 10px 0; }
+a:focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; }
+.campaign-events { list-style: none; padding: 0; margin: 0; }
+.campaign-events li { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; padding: 16px 0; border-top: 1px solid var(--border); font-size: 13px; }
+.campaign-events time { color: var(--muted); }
+@media (max-width: 760px) { .campaign-events li { grid-template-columns: minmax(0, 1fr); } .campaign-content { padding: 18px; } }
 .header-actions button { min-height: 44px; }
 @media (max-width: 760px) { .header-actions { width: 100%; } .header-actions button { flex: 1; } }

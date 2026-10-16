@@ -1,6 +1,7 @@
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import type { CampaignAccess } from "../shared/campaign.js";
 
 import type {
   Customer,
@@ -14,6 +15,7 @@ import type {
 } from "../shared/domain.js";
 
 interface Entities {
+  campaignAccesses: CampaignAccess;
   customers: Customer;
   opportunities: Opportunity;
   conversations: Conversation;
@@ -27,6 +29,7 @@ interface Entities {
 type Table = keyof Entities;
 
 const tables: Table[] = [
+  "campaignAccesses",
   "customers",
   "opportunities",
   "conversations",

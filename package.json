@@ -8,8 +8,8 @@
   "dev:api": "tsx watch server/index.ts",
   "dev:web": "vite",
   "build": "tsc -b && vite build",
-  "test:service": "tsx --test server/service.test.ts server/classification.test.ts server/updates.test.ts server/agent.test.ts",
-    "test:client": "tsx --tsconfig tsconfig.app.json --test tests/client.test.ts tests/theme.test.ts",
+  "test:service": "tsx --test server/service.test.ts server/classification.test.ts server/updates.test.ts server/agent.test.ts server/campaigns.test.ts",
+    "test:client": "tsx --tsconfig tsconfig.app.json --test tests/client.test.ts tests/theme.test.ts tests/campaign.test.ts",
   "lint": "eslint .",
   "preview": "vite preview"
   },

@@ -1,4 +1,5 @@
 import type { Detail, OpportunityListItem } from '../shared/domain'
+import type { CampaignAccessList } from '../shared/campaign'
 
 export class ApiError extends Error {
   status: number
@@ -31,6 +32,7 @@ async function request<T = Detail>(path: string, options: RequestInit = {}): Pro
 }
 
 export const api = {
+  campaignEvents: (signal?: AbortSignal) => request<CampaignAccessList>('/api/campaign-events', { signal, cache: 'no-store' }),
   opportunities: (signal?: AbortSignal) => request<OpportunityListItem[]>('/api/opportunities', { signal }),
   createConversation: () => request('/api/conversations', { method: 'POST' }),
   detail: (id: string, signal?: AbortSignal) => request(`/api/opportunities/${encodeURIComponent(id)}`, { signal }),

@@ -6,6 +6,7 @@ import { CommercialCard } from './components/CommercialCard'
 import { Prospects } from './components/Prospects'
 import { openOpportunity } from './openOpportunity'
 import { ThemeToggle } from './components/ThemeToggle'
+import { CampaignEvents } from './components/CampaignEvents'
 import './App.css'
 
 const errorMessage = (error: unknown) => error instanceof Error ? error.message : 'No se pudo completar la operación.'
@@ -15,7 +16,7 @@ function App() {
   const sessionRef = useRef(session)
   const [detail, setDetail] = useState<Detail | null>(null)
   const [draft, setDraft] = useState(session.draft ?? '')
-  const [view, setView] = useState<'Chat' | 'Prospectos'>('Chat')
+  const [view, setView] = useState<'Chat' | 'Prospectos' | 'Eventos de campaña'>('Chat')
   const [busy, setBusy] = useState(false)
   const locked = useRef(false)
   const generation = useRef(0)
@@ -181,7 +182,8 @@ function App() {
 
   return <div className="app-shell">
     <header className="app-header"><div className="brand"><span className="brand-mark" aria-hidden="true">P</span><div><h1>PASA · Asistente comercial</h1><p>Una conversación. Toda la información a la mano.</p></div><span className="badge">Demo</span></div><div className="header-actions"><ThemeToggle /><button className="secondary" onClick={() => void start()} disabled={busy || loading || serverPending || (unresolvedSend && !missingRecord) || Boolean(session.opportunityId && !verified && !missingRecord)}>{detail || session.opportunityId ? 'Nueva conversación' : 'Iniciar conversación'}</button></div></header>
-    <nav className="main-nav" aria-label="Navegación principal">{(['Chat', 'Prospectos'] as const).map(name => <button key={name} aria-current={view === name ? 'page' : undefined} onClick={() => setView(name)}>{name}</button>)}</nav>
+    <nav className="main-nav" aria-label="Navegación principal">{(['Chat', 'Prospectos', 'Eventos de campaña'] as const).map(name => <button key={name} aria-current={view === name ? 'page' : undefined} onClick={() => setView(name)}>{name}</button>)}</nav>
+    {view === 'Eventos de campaña' && <main><CampaignEvents /></main>}
     {view === 'Prospectos' && <main>{error && <p className="error" role="alert">{error}</p>}<Prospects blocked={switchBlocked} selectedId={session.opportunityId} onOpen={id => void open(id)} /></main>}
     <main className="workspace" hidden={view !== 'Chat'}>
       <section className="card chat" aria-labelledby="chat-title" aria-busy={busy || loading}>
