@@ -1,0 +1,41 @@
+{
+  "name": "pasa-chatbot-poc",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+  "dev": "concurrently -k -n API,WEB \"npm run dev:api\" \"npm run dev:web\"",
+  "dev:api": "tsx watch server/index.ts",
+  "dev:web": "vite",
+  "build": "tsc -b && vite build",
+  "test:service": "tsx --test server/service.test.ts server/classification.test.ts server/updates.test.ts server/agent.test.ts",
+    "test:client": "tsx --tsconfig tsconfig.app.json --test tests/client.test.ts tests/theme.test.ts",
+  "lint": "eslint .",
+  "preview": "vite preview"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.134.0",
+    "dotenv": "^18.0.8",
+    "express": "^5.3.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/express": "^5.0.6",
+    "@types/node": "^24.19.2",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.7",
+    "@vitejs/plugin-react": "^6.1.1",
+    "concurrently": "^10.0.6",
+    "eslint": "^10.10.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "eslint-plugin-react-refresh": "^0.5.6",
+    "globals": "^17.12.0",
+    "tsx": "^4.23.15",
+    "typescript": "~6.0.2",
+    "typescript-eslint": "^8.69.0",
+    "vite": "^8.3.0"
+  }
+}

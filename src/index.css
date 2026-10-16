@@ -1,0 +1,35 @@
+:root {
+  color-scheme: light;
+  --page: #eef4fa; --surface: #ffffff; --surface-soft: #f8fbfe; --surface-blue: #e5f0fc;
+  --text: #203b55; --heading: #14395f; --muted: #526b82; --link: #1b568e;
+  --border: #dbe5ef; --control-border: #748ba0;
+  --primary: #1764a5; --primary-hover: #0e4b80; --on-primary: #ffffff; --brand: #123f70;
+  --focus: #237cca; --accent: #2376bb; --disabled-bg: #edf3f9;
+  --success-bg: #e9f4f1; --success-text: #296445; --success-border: #5a8a70;
+  --warning-bg: #fff4e0; --warning-text: #72581d; --warning-border: #9b752a;
+  --error-bg: #fff0f0; --error-text: #963838; --error-border: #b46666;
+  --shadow: #17467008;
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #101e30; --surface: #192c42; --surface-soft: #14253a; --surface-blue: #244561;
+  --text: #e0eaf4; --heading: #edf4fc; --muted: #b2c5d8; --link: #a3ccef;
+  --border: #425b74; --control-border: #829bb4;
+  --primary: #2e76b0; --primary-hover: #28699e; --on-primary: #ffffff; --brand: #244f78;
+  --focus: #81b7e5; --accent: #81b7e5; --disabled-bg: #263c52;
+  --success-bg: #203c32; --success-text: #b6dfc6; --success-border: #7aa78c;
+  --warning-bg: #3f3524; --warning-text: #edda9d; --warning-border: #b9a56c;
+  --error-bg: #442d38; --error-text: #efb4b4; --error-border: #c78c96;
+  --shadow: #07132133;
+}
+:root { font-family: 'Segoe UI', Arial, sans-serif; color: var(--text); background: var(--page); font-synthesis: none; text-rendering: optimizeLegibility; -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; font-weight: 400; line-height: 1.5; }
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 280px; }
+button, textarea, input, select { font: inherit; }
+input::placeholder, textarea::placeholder { color: var(--muted); opacity: 1; }
+button { cursor: pointer; transition: background .15s; }
+button:disabled { cursor: not-allowed; background: var(--disabled-bg); color: var(--muted); border-color: var(--control-border); }
+button:focus-visible, textarea:focus-visible, input:focus-visible, select:focus-visible, [tabindex]:focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; }
+[hidden] { display: none !important; }
+h1, h2, h3, p { margin-top: 0; }
+button, p, dd, li, h1, h2, h3 { overflow-wrap: anywhere; }

@@ -1,0 +1,196 @@
+{
+  "documento": "Calificación actual de la POC PASA",
+  "fuentes_codigo": [
+    "shared/domain.ts: scoringFields, answersSchema, labels, defaultRules, rulesSchema, calculate",
+    "server/service.ts: CRMService.constructor, CRMService.sendMessage",
+    "server/repository.ts: SqliteRepository.all",
+    "server/updates.ts: applyUpdates"
+  ],
+  "origen_reglas": {
+    "valores_documentados": "Configuración persistida consultada en data/pasa.sqlite, ruta por defecto del proyecto.",
+    "consulta": "Solo lectura; exclusivamente documentos de entity='rules', ordenados por rowid.",
+    "cantidad_registros_rules": 1,
+    "registro_seleccionado": "Último por orden de inserción (rowid), igual que repo.all('rules').at(-1). No se selecciona por mayor version ni por fecha.",
+    "version": 1,
+    "coincide_con_defaultRules": true,
+    "alcance_comparacion": "Coinciden version, los puntos de todos los valores de timeframe, intention y capacity y los umbrales green y yellow. No se equiparan id ni createdAt.",
+    "configuracion_runtime_verificada": false,
+    "limite_verificacion": "server/index.ts usa process.env.DATABASE_PATH o data/pasa.sqlite. No se leyó .env ni se comprobó la configuración efectiva del proceso del servidor; estos valores están verificados en la base de la ruta por defecto, no en cualquier otra base que pudiera utilizar DATABASE_PATH.",
+    "inicializacion": "CRMService guarda defaultRules únicamente cuando no existe ningún registro en rules. Si existen reglas persistidas, las utiliza sin sustituirlas por los valores por defecto.",
+    "rules_utilizadas": {
+      "version": 1,
+      "timeframe": { "0-30": 40, "31-90": 20, "90+": 10, "undefined": 0 },
+      "intention": { "advance": 30, "compare": 15, "explore": 0 },
+      "capacity": { "ready": 30, "review": 15, "unavailable": 0 },
+      "green": 80,
+      "yellow": 50
+    }
+  },
+  "campos_puntuables": [
+    {
+      "field": "timeframe",
+      "ruta": "answers.timeframe",
+      "etiqueta_desglose": "Temporalidad",
+      "valores": [
+        { "value": "0-30", "label": "En los próximos 30 días", "points": 40 },
+        { "value": "31-90", "label": "Entre 1 y 3 meses", "points": 20 },
+        { "value": "90+", "label": "En más de 3 meses", "points": 10 },
+        { "value": "undefined", "label": "Por definir", "points": 0 }
+      ],
+      "distincion": "El string literal 'undefined' es un valor comercial válido de timeframe; no es la ausencia JavaScript undefined ni el estado collection.unknown. Respondido con este valor aporta 0 sin volver provisional la evaluación por ese criterio."
+    },
+    {
+      "field": "intention",
+      "ruta": "answers.intention",
+      "etiqueta_desglose": "Intención",
+      "valores": [
+        { "value": "advance", "label": "Quiere avanzar", "points": 30 },
+        { "value": "compare", "label": "Compara opciones", "points": 15 },
+        { "value": "explore", "label": "Explora", "points": 0 }
+      ]
+    },
+    {
+      "field": "capacity",
+      "ruta": "answers.capacity",
+      "etiqueta_desglose": "Capacidad",
+      "valores": [
+        { "value": "ready", "label": "Recursos compatibles", "points": 30 },
+        { "value": "review", "label": "Revisar alternativas", "points": 15 },
+        { "value": "unavailable", "label": "Sin recursos por ahora", "points": 0 }
+      ]
+    }
+  ],
+  "calculo": {
+    "firma": "calculate(answers, rules, collection = {})",
+    "validacion_valor": "Para cada field de scoringFields, el valor es válido si answers[field] !== undefined y answersSchema.shape[field].safeParse(answers[field]).success.",
+    "estado_efectivo": "collection[field] ?? (valorValido ? 'answered' : 'pending')",
+    "puntos_por_criterio": "Si el estado efectivo es answered y el valor es válido, rules[field][answers[field]]. Si es unknown o declined y answers[field] === undefined, 0. En los demás casos, null.",
+    "criterios_abordados": "Los tres criterios tienen criteria[field].points !== null.",
+    "formula_score": "Si todos están abordados: score = breakdown.Temporalidad + breakdown.Intención + breakdown.Capacidad. En otro caso: score = null.",
+    "puntuacion_minima_reglas_documentadas": 0,
+    "puntuacion_maxima_reglas_documentadas": 100,
+    "formula_maximo": "max(rules.timeframe) + max(rules.intention) + max(rules.capacity) = 40 + 30 + 30 = 100",
+    "redondeo_o_recorte": "calculate no redondea ni limita el resultado a 100. rulesSchema exige que la suma de los máximos configurados no supere 100; los pesos admiten números, no únicamente enteros.",
+    "mutaciones": "calculate no modifica answers, collection ni rules. Los cambios de datos los aplica el servicio antes de calcular."
+  },
+  "umbrales": {
+    "green": { "label": "Verde", "condicion": "score !== null && score >= rules.green", "limite_inferior_inclusivo": 80 },
+    "yellow": { "label": "Amarillo", "condicion": "score !== null && score >= rules.yellow && score < rules.green", "limite_inferior_inclusivo": 50, "limite_superior_exclusivo": 80 },
+    "red": { "label": "Rojo", "condicion": "score !== null && score < rules.yellow", "limite_superior_exclusivo": 50 },
+    "sin_clasificar": { "label": "Sin clasificar", "score": null, "grade": null },
+    "descarte_automatico": false
+  },
+  "collection": {
+    "pending": { "points": null, "abordado": false, "detalle": "No aporta puntos ni completa el criterio, incluso si existe un valor en answers." },
+    "answered": { "detalle": "Con valor válido aporta los puntos de rules y completa el criterio. Con valor ausente, null o inválido deja points=null e impide clasificar. Un valor permitido con 0 puntos sí completa el criterio y no implica provisionalidad." },
+    "unknown": { "points_si_valor_ausente": 0, "abordado_si_valor_ausente": true, "detalle": "Se añade el field a unknownCriteria solo si answers[field] === undefined. Si hay cualquier valor residual, incluso null, points=null y ese field no se añade a unknownCriteria." },
+    "declined": { "points_si_valor_ausente": 0, "abordado_si_valor_ausente": true, "detalle": "Se añade el field a declinedCriteria solo si answers[field] === undefined. Si hay cualquier valor residual, incluso null, points=null y ese field no se añade a declinedCriteria." },
+    "not_applicable": { "points": null, "abordado": false, "detalle": "No es un estado válido para completar timeframe, intention o capacity, aunque exista un valor comercial." },
+    "campo_sin_estado": "Si collection[field] no está definido, un valor comercial válido se considera answered; un valor ausente o inválido se considera pending.",
+    "ausencia_en_json": "Un campo ausente de answers representa answers[field] === undefined. JSON null no equivale a ausencia.",
+    "retiro_de_datos": "applyUpdates elimina el valor vigente cuando aplica unknown o declined y conserva el estado en collection y la transición en events. No escribe un valor comercial numérico 0 para representar desconocimiento o rechazo."
+  },
+  "score_y_grade_null": {
+    "condicion": "Al menos uno de los tres criterios tiene points=null.",
+    "causas": [
+      "Estado pending.",
+      "Estado ausente y valor comercial ausente o inválido.",
+      "Estado answered sin valor comercial válido.",
+      "Estado unknown o declined con valor residual en answers.",
+      "Estado not_applicable en un criterio puntuable."
+    ],
+    "desglose_parcial": "Los criterios abordados conservan sus puntos en breakdown; los pendientes o inconsistentes se muestran con null, aunque score y grade sean null."
+  },
+  "provisionalidad": {
+    "formula": "provisional = unknownCriteria.length + declinedCriteria.length > 0",
+    "alcance": "Solo se consideran timeframe, intention y capacity. Unknown o declined en contacto, presupuesto u otros campos no vuelven provisional la calificación.",
+    "independiente_de_score": "Puede ser true incluso si score y grade son null: basta con que un criterio puntuable esté unknown/declined sin valor y otro impida completar el cálculo.",
+    "cero_confirmado": "Los valores comerciales válidos con 0 puntos no se añaden a unknownCriteria ni declinedCriteria.",
+    "correccion": "Al pasar a answered con valor válido, el criterio sale de las listas de desconocidos/rechazados en la nueva evaluación. Los registros históricos no se reescriben."
+  },
+  "compatibilidad": {
+    "sin_collection": "Omitir collection o pasar undefined usa {}. Cada valor válido ya existente se trata como answered; ausencia o valor inválido sigue pending.",
+    "collection_parcial": "La compatibilidad se aplica campo por campo cuando falta su estado. Un estado explícito prevalece sobre la presencia de un valor.",
+    "evaluaciones_historicas": "Evaluation permite que provisional, unknownCriteria, declinedCriteria y criteria estén ausentes en registros antiguos. Su ausencia no demuestra provisional=false. No se reconstruyen ni recalculan al consultar la ficha o el listado."
+  },
+  "campos_recopilados_sin_puntos": {
+    "Customer": ["name", "phone", "email"],
+    "Opportunity": ["vehicleId"],
+    "answers": ["budget", "payment", "downPayment", "tradeIn", "tradeInBrand", "tradeInModel", "tradeInYear", "branch", "action", "questions"],
+    "campo_compatible_del_dominio": { "field": "answers.tradeInDetails", "detalle": "Existe en answersSchema y en dependencias, pero no está incluido en agentFieldSchema del extractor actual. Tampoco aporta puntos." },
+    "efecto": "Estos datos tienen su propia recopilación y validación, pero no cambian score, grade ni provisional. No hay puntos por vehículo, presupuesto, enganche ni vehículo a cuenta."
+  },
+  "integracion_servicio": {
+    "momento": "Tras recibir y validar la respuesta del agente y aplicar cambios, confirmaciones y dependencias mediante applyUpdates.",
+    "reglas": "repo.all('rules').at(-1), con all ordenado por rowid ascendente.",
+    "llamada": "calculate(opportunity.answers, rules, opportunity.collection)",
+    "persistencia_oportunidad": ["score", "grade", "ruleVersion"],
+    "persistencia_nueva_evaluacion": ["score", "grade", "breakdown", "criteria", "provisional", "unknownCriteria", "declinedCriteria", "ruleVersion"],
+    "historial": "Cada mensaje procesado correctamente genera una nueva evaluación, aunque no cambie un criterio puntuable. No sobrescribe las evaluaciones anteriores.",
+    "idempotencia": "Un reintento idéntico ya completado y sin mensajes de usuario posteriores devuelve la ficha existente sin calcular otra evaluación. Un reintento antiguo con mensajes posteriores es rechazado.",
+    "fallos": "Si el procesamiento falla o hay conflicto de contacto, la transacción de resultados revierte y no se guarda una nueva evaluación.",
+    "consultas": "GET /api/opportunities y GET /api/opportunities/:id no recalculan ni guardan evaluaciones.",
+    "status": "Después de procesar: score === null produce status='conversing'; un score no null produce status='qualified', incluso con grade='red'. No se asigna status='discarded' por la puntuación.",
+    "recopilacion_separada": "Tener score no significa haber completado la recopilación. applyUpdates actualiza nextAction según propuestas pendientes, datos de contacto pendientes, missingBlocks y action."
+  },
+  "ejemplos": [
+    {
+      "caso": "completo",
+      "reglas": "origen_reglas.rules_utilizadas",
+      "entrada": {
+        "answers": { "timeframe": "0-30", "intention": "advance", "capacity": "ready" },
+        "collection": { "timeframe": "answered", "intention": "answered", "capacity": "answered" }
+      },
+      "resultado_esperado": {
+        "score": 100,
+        "grade": "green",
+        "breakdown": { "Temporalidad": 40, "Intención": 30, "Capacidad": 30 },
+        "criteria": { "timeframe": { "status": "answered", "points": 40 }, "intention": { "status": "answered", "points": 30 }, "capacity": { "status": "answered", "points": 30 } },
+        "provisional": false,
+        "unknownCriteria": [],
+        "declinedCriteria": []
+      }
+    },
+    {
+      "caso": "provisional",
+      "reglas": "origen_reglas.rules_utilizadas",
+      "entrada": {
+        "answers": { "intention": "compare" },
+        "collection": { "timeframe": "unknown", "intention": "answered", "capacity": "declined" }
+      },
+      "resultado_esperado": {
+        "score": 15,
+        "grade": "red",
+        "breakdown": { "Temporalidad": 0, "Intención": 15, "Capacidad": 0 },
+        "criteria": { "timeframe": { "status": "unknown", "points": 0 }, "intention": { "status": "answered", "points": 15 }, "capacity": { "status": "declined", "points": 0 } },
+        "provisional": true,
+        "unknownCriteria": ["timeframe"],
+        "declinedCriteria": ["capacity"]
+      }
+    },
+    {
+      "caso": "pendiente",
+      "reglas": "origen_reglas.rules_utilizadas",
+      "entrada": {
+        "answers": { "timeframe": "31-90", "intention": "compare" },
+        "collection": { "timeframe": "answered", "intention": "answered", "capacity": "pending" }
+      },
+      "resultado_esperado": {
+        "score": null,
+        "grade": null,
+        "breakdown": { "Temporalidad": 20, "Intención": 15, "Capacidad": null },
+        "criteria": { "timeframe": { "status": "answered", "points": 20 }, "intention": { "status": "answered", "points": 15 }, "capacity": { "status": "pending", "points": null } },
+        "provisional": false,
+        "unknownCriteria": [],
+        "declinedCriteria": []
+      }
+    }
+  ],
+  "verificacion": {
+    "funcion": "shared/domain.ts: calculate",
+    "metodo": "Comparación profunda de cada resultado_esperado con el resultado de calculate usando las entradas y reglas documentadas. Comprobación de etiquetas, valores, puntos, umbrales y coincidencia con la regla persistida.",
+    "datos": "Entradas sintéticas en memoria, sin datos personales.",
+    "base_existente": "Solo lectura de reglas, sin instanciar CRMService ni SqliteRepository sobre la base real.",
+    "ejemplos_verificados": 3
+  }
+}
