@@ -15,15 +15,59 @@ import { ProspectRow } from '../src/components/Prospects.tsx'
 import { CommercialCard } from '../src/components/CommercialCard.tsx'
 import { EvaluationBreakdown } from '../src/components/EvaluationBreakdown.tsx'
 import { calculate, defaultRules } from '../shared/domain.ts'
+import { FollowupControls } from '../src/components/FollowupControls.tsx'
 import { SqliteRepository } from '../server/repository.ts'
 import { CRMService } from '../server/service.ts'
 import type { AgentOutput, ChatAgent } from '../server/agent.ts'
 
 const fake: ChatAgent = { configured: true, respond: async (): Promise<AgentOutput> => ({ message: 'Respuesta simulada', updates: [] }) }
 
+test('seguimiento UI: explica bloqueo inicial, orden 24/48 h, repetición y ejecución en curso', async () => {
+  const repo = new SqliteRepository(':memory:')
+  try {
+    const service = new CRMService(repo, fake)
+    const id = (await service.createConversation()).opportunity.id
+    const render = async (blocked = false) => renderToStaticMarkup(createElement(FollowupControls, { detail: await service.detail(id), blocked, onSimulate: () => {} }))
+    let html = await render()
+    assert.match(html, /Simulación de seguimiento/)
+    assert.equal((html.match(/disabled=""/g) ?? []).length, 2)
+    assert.match(html, /Se necesita un mensaje del usuario/)
+    await service.sendMessage(id, { text: 'hola', requestId: 'followup-ui' })
+    html = await render()
+    assert.match(html, /Simular recordatorio de 24 h/)
+    assert.match(html, /Simular recordatorio de 48 h/)
+    assert.match(html, /Primero debes ejecutar el recordatorio de 24 h/)
+    assert.equal((html.match(/disabled=""/g) ?? []).length, 1)
+    const task = (await service.detail(id)).tasks.find(task => task.attempt === 1)!
+    await service.followups.execute(task.id, 'simulated')
+    html = await render()
+    assert.match(html, /24 h ya fue resuelto/)
+    assert.equal((html.match(/disabled=""/g) ?? []).length, 1)
+    assert.doesNotMatch(html, /Primero debes/)
+    html = await render(true)
+    assert.equal((html.match(/disabled=""/g) ?? []).length, 2)
+    assert.match(html, /Espera a que termine la operación/)
+  } finally { repo.close() }
+})
+
+test('seguimiento API: simulación envía intento y ciclo exactos; respuesta conserva la ficha', async () => {
+  const original = globalThis.fetch
+  const repo = new SqliteRepository(':memory:')
+  try {
+    const detail = await new CRMService(repo, fake).createConversation()
+    globalThis.fetch = async (url, options) => {
+      assert.equal(url, `/api/opportunities/${detail.opportunity.id}/followups/simulate`)
+      assert.equal(options?.method, 'POST')
+      assert.deepEqual(JSON.parse(String(options?.body)), { attempt: 2, cycleId: 'user-message-cycle' })
+      return new Response(JSON.stringify(detail), { status: 200, headers: { 'Content-Type': 'application/json' } })
+    }
+    assert.deepEqual(await api.simulateFollowup(detail.opportunity.id, 2, 'user-message-cycle'), detail)
+  } finally { globalThis.fetch = original; repo.close() }
+})
+
 test('peticiones reales del cliente: URLs, cuerpo exacto y conflicto claro', async () => {
   const repo = new SqliteRepository(':memory:')
-  const detail = new CRMService(repo, fake).createConversation()
+  const detail = await new CRMService(repo, fake).createConversation()
   const requests: { url: string; options?: RequestInit }[] = []
   const original = globalThis.fetch
   let conflict = false
@@ -50,12 +94,12 @@ test('peticiones reales del cliente: URLs, cuerpo exacto y conflicto claro', asy
   } finally { globalThis.fetch = original; repo.close() }
 })
 
-test('sesión y recuperación: texto exacto, resultado completado, fallos antiguos', () => {
+test('sesión y recuperación: texto exacto, resultado completado, fallos antiguos', async () => {
   const memory = new Map<string, string>()
   const original = Object.getOwnPropertyDescriptor(globalThis, 'sessionStorage')
   Object.defineProperty(globalThis, 'sessionStorage', { configurable: true, value: { getItem: (key: string) => memory.get(key) ?? null, setItem: (key: string, value: string) => memory.set(key, value) } })
   const repo = new SqliteRepository(':memory:')
-  const detail = new CRMService(repo, fake).createConversation()
+  const detail = await new CRMService(repo, fake).createConversation()
   const pending = { text: '  Hola\nPASA  ', requestId: 'recover-exact' }
   try {
     saveSession({ opportunityId: detail.opportunity.id, pending })
@@ -79,9 +123,9 @@ test('sesión y recuperación: texto exacto, resultado completado, fallos antigu
   }
 })
 
-test('ficha renderizada: estados distintos, MXN, cero explícito y ausencia', () => {
+test('ficha renderizada: estados distintos, MXN, cero explícito y ausencia', async () => {
   const repo = new SqliteRepository(':memory:')
-  const detail = new CRMService(repo, fake).createConversation()
+  const detail = await new CRMService(repo, fake).createConversation()
   try {
     Object.assign(detail.opportunity.collection, { budget: 'unknown', downPayment: 'not_applicable', phone: 'declined', capacity: 'answered' })
     Object.assign(detail.opportunity.answers, { capacity: 'ready', payment: 'cash', tradeIn: false })
@@ -91,6 +135,8 @@ test('ficha renderizada: estados distintos, MXN, cero explícito y ausencia', ()
     assert.match(html, /No aplica/)
     assert.match(html, /Pendiente/)
     assert.match(html, /Respondido/)
+    assert.doesNotMatch(html, /Calificación|Clasificación comercial|Evaluaciones guardadas/)
+    assert.match(html, /Recopilación/)
     assert.doesNotMatch(html, /\$0/)
     detail.opportunity.answers.budget = 0
     detail.opportunity.collection.budget = 'answered'
@@ -101,7 +147,7 @@ test('ficha renderizada: estados distintos, MXN, cero explícito y ausencia', ()
   } finally { repo.close() }
 })
 
-test('desglose visual diferencia pendiente de cero y conserva evaluación histórica', () => {
+test('desglose visual diferencia pendiente de cero y conserva evaluación histórica', async () => {
   const rules = { ...defaultRules, id: 'demo', createdAt: '2026-01-01T00:00:00.000Z' }
   const metadata = { id: 'evaluation', opportunityId: 'demo', createdAt: rules.createdAt, ruleVersion: 1 }
   const calculated = calculate({ intention: 'compare' }, rules, { timeframe: 'pending', intention: 'answered', capacity: 'unknown' })
@@ -119,8 +165,8 @@ test('desglose visual diferencia pendiente de cero y conserva evaluación histó
 test('abrir solo consulta GET; selección, borradores y envíos sobreviven a cambios y recarga', async () => {
   const repo = new SqliteRepository(':memory:')
   const service = new CRMService(repo, fake)
-  const first = service.createConversation()
-  const second = service.createConversation()
+  const first = await service.createConversation()
+  const second = await service.createConversation()
   const originalFetch = globalThis.fetch
   const originalStorage = Object.getOwnPropertyDescriptor(globalThis, 'sessionStorage')
   const memory = new Map<string, string>()
@@ -129,7 +175,7 @@ test('abrir solo consulta GET; selección, borradores y envíos sobreviven a cam
   globalThis.fetch = async (url, options) => {
     assert.ok(!options?.method || options.method === 'GET')
     requests.push(String(url))
-    const body = String(url) === '/api/opportunities' ? service.listOpportunities() : service.detail(decodeURIComponent(String(url).split('/').at(-1)!))
+    const body = String(url) === '/api/opportunities' ? await service.listOpportunities() : await service.detail(decodeURIComponent(String(url).split('/').at(-1)!))
     return new Response(JSON.stringify(body), { status: 200 })
   }
   try {
@@ -162,23 +208,23 @@ test('abrir solo consulta GET; selección, borradores y envíos sobreviven a cam
   }
 })
 
-test('prospectos: ausencia y cero explícito, estados y búsqueda por nombre/vehículo', () => {
+test('prospectos: oculta puntuaciones históricas y conserva estados y búsqueda', async () => {
   const repo = new SqliteRepository(':memory:')
   const service = new CRMService(repo, fake)
-  const first = service.createConversation()
-  const second = service.createConversation()
+  const first = await service.createConversation()
+  const second = await service.createConversation()
   try {
     repo.put('customers', { ...second.customer, name: 'José Pérez' })
     repo.put('opportunities', { ...second.opportunity, score: 0, grade: 'red', vehicleId: 'territory', collection: { timeframe: 'pending', capacity: 'unknown', intention: 'declined' } })
-    const rows = service.listOpportunities()
+    const rows = await service.listOpportunities()
     const missing = rows.find(row => row.id === first.opportunity.id)!
     const zero = rows.find(row => row.id === second.opportunity.id)!
     const emptyHTML = renderToStaticMarkup(createElement(ProspectRow, { row: missing, blocked: false, selected: false, onOpen: () => {} }))
     assert.match(emptyHTML, /Sin proporcionar/)
-    assert.match(emptyHTML, /Sin clasificar/)
+    assert.doesNotMatch(emptyHTML, /Calificación|puntos/)
     assert.doesNotMatch(emptyHTML, /0 puntos/)
     const zeroHTML = renderToStaticMarkup(createElement(ProspectRow, { row: zero, blocked: true, selected: true, onOpen: () => {} }))
-    assert.match(zeroHTML, /0 puntos · Rojo/)
+    assert.doesNotMatch(zeroHTML, /Calificación|puntos|Rojo/)
     assert.match(zeroHTML, /Pendientes: Temporalidad/)
     assert.match(zeroHTML, /No sabe: Capacidad/)
     assert.match(zeroHTML, /Prefiere no responder: Intención/)
@@ -195,7 +241,7 @@ const paginationRows: OpportunityListItem[] = Array.from({ length: 23 }, (_, ind
   status: 'new', collection: {}, lastInteraction: new Date(Date.UTC(2026, 0, index + 1)).toISOString(),
 }))
 
-test('paginación: cinco inicialmente, límites y cero resultados sin rangos inválidos', () => {
+test('paginación: cinco inicialmente, límites y cero resultados sin rangos inválidos', async () => {
   const first = prospectPage(paginationRows, initialPagination)
   assert.equal(first.range, '1–5 de 23 prospectos')
   assert.equal(first.items.length, 5)
@@ -215,7 +261,7 @@ test('paginación: cinco inicialmente, límites y cero resultados sin rangos inv
   assert.doesNotMatch(html, /Anterior|Siguiente|aria-current/)
 })
 
-test('búsqueda y orden antes de paginar; búsqueda y cantidad vuelven a primera página', () => {
+test('búsqueda y orden antes de paginar; búsqueda y cantidad vuelven a primera página', async () => {
   let state = { ...initialPagination, page: 4 }
   state = updatePagination(state, { type: 'search', value: 'jose' })
   assert.equal(state.page, 1)
@@ -234,7 +280,7 @@ test('búsqueda y orden antes de paginar; búsqueda y cantidad vuelven a primera
   assert.equal(prospectPage(paginationRows, state).range, '0 prospectos')
 })
 
-test('actualización conserva la página válida y ajusta al reducir el listado', () => {
+test('actualización conserva la página válida y ajusta al reducir el listado', async () => {
   const page3 = { ...initialPagination, page: 3 }
   assert.equal(updatePagination(page3, { type: 'refresh', rows: paginationRows }).page, 3)
   const reduced = paginationRows.slice(0, 6)
@@ -246,7 +292,7 @@ test('actualización conserva la página válida y ajusta al reducir el listado'
   assert.equal(updatePagination(page3, { type: 'refresh', rows: [] }).page, 1)
 })
 
-test('páginas compactas, página activa accesible y controles deshabilitados en límites', () => {
+test('páginas compactas, página activa accesible y controles deshabilitados en límites', async () => {
   for (const count of [1, 5, 8, 20, 200]) {
     for (let page = 1; page <= count; page++) {
       const buttons = pageButtons(page, count)
@@ -267,14 +313,14 @@ test('páginas compactas, página activa accesible y controles deshabilitados en
   assert.match(render(prospectPage(paginationRows, { ...initialPagination, page: 5 })), /disabled=""[^>]*>Siguiente/)
 })
 
-test('formato monetario compartido: miles, dos decimales, cero y fracciones', () => {
+test('formato monetario compartido: miles, dos decimales, cero y fracciones', async () => {
   assert.equal(formatMXN(500000), '$500,000.00 MXN')
   assert.equal(formatMXN(500000.5), '$500,000.50 MXN')
   assert.equal(formatMXN(0), '$0.00 MXN')
   assert.equal(formatMXN(12.34), '$12.34 MXN')
 })
 
-test('teléfono: normalización mexicana y agrupación visual sin inventar prefijos', () => {
+test('teléfono: normalización mexicana y agrupación visual sin inventar prefijos', async () => {
   for (const value of ['3521455896', '352 145 5896', '(352) 145-5896', '+52 (352) 145-5896', '52 352 145 5896', '  +52 352 145 5896  ']) {
     assert.equal(phoneSchema.parse(value), '3521455896')
     assert.equal(normalizePhone(value), '3521455896')
@@ -295,9 +341,9 @@ test('teléfono: normalización mexicana y agrupación visual sin inventar prefi
   assert.equal(phoneHasEvidence('3521455896', '3521455896 ext 12'), false)
 })
 
-test('contacto renderizado: agrupación nacional y estados pendientes o rechazados', () => {
+test('contacto renderizado: agrupación nacional y estados pendientes o rechazados', async () => {
   const repo = new SqliteRepository(':memory:')
-  const detail = new CRMService(repo, fake).createConversation()
+  const detail = await new CRMService(repo, fake).createConversation()
   try {
     detail.customer.phone = '3521455896'
     detail.opportunity.collection.phone = 'answered'
@@ -313,10 +359,10 @@ test('contacto renderizado: agrupación nacional y estados pendientes o rechazad
   } finally { repo.close() }
 })
 
-test('ficha muestra ausencia de dudas como Sin dudas y Respondido', () => {
+test('ficha muestra ausencia de dudas como Sin dudas y Respondido', async () => {
   const repo = new SqliteRepository(':memory:')
   try {
-    const detail = new CRMService(repo, fake).createConversation()
+    const detail = await new CRMService(repo, fake).createConversation()
     detail.opportunity.answers.questions = 'Sin dudas'
     detail.opportunity.collection.questions = 'answered'
     const html = renderToStaticMarkup(createElement(CommercialCard, { detail }))
@@ -324,7 +370,7 @@ test('ficha muestra ausencia de dudas como Sin dudas y Respondido', () => {
   } finally { repo.close() }
 })
 
-test('orden por fecha ascendente/descendente y empate estable sin mutaciones', () => {
+test('orden por fecha ascendente/descendente y empate estable sin mutaciones', async () => {
   const first = { ...paginationRows[0], id: 'a', lastInteraction: '2026-01-01T00:00:00.000Z' }
   const second = { ...paginationRows[1], id: 'b', lastInteraction: '2026-01-01T00:00:00.000Z' }
   const last = { ...paginationRows[2], id: 'c', lastInteraction: '2026-02-01T00:00:00.000Z' }
@@ -335,7 +381,7 @@ test('orden por fecha ascendente/descendente y empate estable sin mutaciones', (
   assert.equal(JSON.stringify(rows), snapshot)
 })
 
-test('orden español: mayúsculas y acentos equivalentes, ñ y nombres vacíos al final', () => {
+test('orden español: mayúsculas y acentos equivalentes, ñ y nombres vacíos al final', async () => {
   const fixture = (id: string, name?: string): OpportunityListItem => ({ ...paginationRows[0], id, customer: { id, name } })
   const rows = [fixture('empty3', '  '), fixture('b', 'ÁLVARO'), fixture('z', 'Zoe'), fixture('empty1'), fixture('o', 'Olga'), fixture('n', 'Ñora'), fixture('empty2', ''), fixture('a', 'alvaro')]
   const original = JSON.stringify(rows)
@@ -352,7 +398,7 @@ test('orden español: mayúsculas y acentos equivalentes, ñ y nombres vacíos a
   assert.match(emptyHTML, /<h3>Sin proporcionar<\/h3>/)
 })
 
-test('orden y búsqueda globales antes de paginar; cambiar orden reinicia y actualizar lo conserva', () => {
+test('orden y búsqueda globales antes de paginar; cambiar orden reinicia y actualizar lo conserva', async () => {
   const original = JSON.stringify(paginationRows)
   for (const order of ['recent', 'oldest', 'nameAsc', 'nameDesc'] as ProspectSort[]) {
     const state = updatePagination({ ...initialPagination, search: 'territory', page: 3 }, { type: 'order', value: order })

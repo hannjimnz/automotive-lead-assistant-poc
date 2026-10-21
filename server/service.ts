@@ -1,9 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import {
-  defaultRules,
   identitySchema,
-  calculate,
   type Message,
   type CollectionProgress,
   type Customer,
@@ -16,7 +14,9 @@ import { agentFieldSchema, agentOutputSchema, AnthropicAgent, type ChatAgent } f
 import { z } from "zod";
 import { phoneSchema } from "../shared/phone.js";
 import { applyUpdates } from "./updates.js";
-import { SqliteRepository } from "./repository.js";
+import type { Repository } from "./repository.js";
+import { Followups } from "./followups.js";
+import { enqueueLeadSyncSnapshot } from "./lead-sync-model.js";
 
 export class ApiError extends Error {
   public status: number;
@@ -31,44 +31,53 @@ export class ApiError extends Error {
 }
 
 export class CRMService {
-  private repo: SqliteRepository;
+  private repo: Repository;
   private agent: ChatAgent;
   private active = new Set<string>();
+  readonly followups: Followups;
+  private clock: () => Date;
 
-  constructor(repo: SqliteRepository, agent: ChatAgent = new AnthropicAgent()) {
+  constructor(repo: Repository, agent: ChatAgent = new AnthropicAgent(), clock: () => Date = () => new Date()) {
     this.repo = repo;
     this.agent = agent;
+    this.clock = clock;
+    this.followups = new Followups(repo, async id => (await this.detail(id)), clock);
 
-    // Crea las reglas iniciales solo si no existen.
-    if (this.repo.all("rules").length === 0) {
-      this.repo.put("rules", {
-        ...defaultRules,
-        id: randomUUID(),
-        createdAt: this.now(),
-      });
-    }
+    this.ready = this.initialize();
+  }
+
+  readonly ready: Promise<void>;
+
+  private async initialize() {
+    // Retire the POC's active scores while preserving historical evaluation documents.
+    await this.repo.transaction(async () => {
+      for (const opportunity of await this.repo.all("opportunities")) {
+        if (opportunity.score != null || opportunity.grade != null || opportunity.ruleVersion != null || opportunity.status === "qualified") {
+          await this.repo.put("opportunities", withoutLocalScoring(opportunity));
+        }
+      }
+    });
 
     // Recupera mensajes interrumpidos por un reinicio.
-    for (const message of this.repo.all("messages")) {
+    for (const message of (await this.repo.all("messages"))) {
       if (message.status === "pending") {
-        this.repo.put("messages", {
+        (await this.repo.put("messages", {
           ...message,
           status: "error",
           error: "El servidor se reinició. Puedes reintentar.",
-        });
+        }));
       }
     }
   }
 
   private now(): string {
-    return new Date().toISOString();
+    return this.clock().toISOString();
   }
 
-  listOpportunities(): OpportunityListItem[] {
-    const customers = new Map(this.repo.all("customers").map(customer => [customer.id, customer]));
-    // Repository insertion order preserves the latest saved evaluation, without recalculation.
-    const latest = new Map(this.repo.all("evaluations").map(evaluation => [evaluation.opportunityId, evaluation]));
-    return this.repo.all("opportunities").map(opportunity => {
+  async listOpportunities(): Promise<OpportunityListItem[]> {
+    await this.ready;
+    const customers = new Map((await this.repo.all("customers")).map(customer => [customer.id, customer]));
+    return (await this.repo.all("opportunities")).map(opportunity => {
       const customer = customers.get(opportunity.customerId);
       const collection = { ...opportunity.collection };
       for (const field of agentFieldSchema.options) {
@@ -81,10 +90,10 @@ export class CRMService {
         id: opportunity.id,
         customer: { id: opportunity.customerId, ...(customer?.name ? { name: customer.name } : {}) },
         vehicleId: opportunity.vehicleId,
-        score: opportunity.score ?? null,
-        grade: opportunity.grade ?? null,
-        provisional: latest.get(opportunity.id)?.provisional ?? null,
-        status: opportunity.status,
+        score: null,
+        grade: null,
+        provisional: null,
+        status: withoutLocalScoring(opportunity).status,
         collection,
         lastInteraction: opportunity.lastInteraction,
       };
@@ -92,75 +101,82 @@ export class CRMService {
   }
 
   async sendMessage(id: string, input: unknown): Promise<Detail> {
+    await this.ready;
     const parsed = z.object({ text: z.string().min(1).max(8000).refine(v => v.trim().length > 0), requestId: z.string().trim().min(1).max(100) }).strict().safeParse(input);
     if (!parsed.success) throw new ApiError(400, "INVALID_MESSAGE", "Se requieren text y requestId válidos.");
     const { text, requestId } = parsed.data;
     if (this.active.has(id)) throw new ApiError(409, "MESSAGE_IN_PROGRESS", "Hay un mensaje en proceso para esta oportunidad.");
-    const detail = this.detail(id);
-    if (detail.messages.some(m => m.status === "pending")) throw new ApiError(409, "MESSAGE_IN_PROGRESS", "Hay un mensaje en proceso para esta oportunidad.");
-    const existing = detail.messages.find(m => m.role === "user" && m.requestId === requestId);
-    if (existing && existing.text !== text) throw new ApiError(409, "REQUEST_ID_CONFLICT", "requestId ya corresponde a otro texto.");
-    if (existing && detail.messages.slice(detail.messages.indexOf(existing) + 1).some(m => m.role === "user")) throw new ApiError(409, "STALE_REQUEST", "Este mensaje tiene mensajes posteriores; no se puede reintentar.");
-    if (existing?.status === "complete") return detail;
-    if (existing?.status === "pending") throw new ApiError(409, "MESSAGE_IN_PROGRESS", "El mensaje sigue en proceso.");
     this.active.add(id);
-    const message: Message = { ...existing, id: existing?.id ?? randomUUID(), conversationId: detail.conversation.id, role: "user", text, requestId, createdAt: existing?.createdAt ?? this.now(), status: "pending" };
-    delete message.error;
-    let stage = "save_message";
     try {
-      this.repo.transaction(() => this.repo.put("messages", message));
-      stage = "agent";
-      if (!this.agent.configured) throw new ApiError(503, "AI_NOT_CONFIGURED", "Configura el proveedor de IA para procesar mensajes.");
-      const raw = await this.agent.respond({ contact: detail.customer, vehicleId: detail.opportunity.vehicleId, answers: detail.opportunity.answers, collection: detail.opportunity.collection ?? {}, messages: detail.messages.filter(m => m.id !== message.id), proposals: detail.opportunity.proposals, pendingQuestion: detail.opportunity.pendingQuestion }, text);
-      stage = "validate_output";
-      const output = agentOutputSchema.parse(raw);
-      return this.repo.transaction(() => {
-        const current = this.detail(id);
-        const customer = current.customer;
-        const opportunity = current.opportunity;
-        const assistantId = randomUUID();
-        stage = "apply_updates";
-        const changes = applyUpdates(current, output, message, assistantId, (field, value) => {
-          const conflict = this.repo.all("customers").some(other => {
-            if (other.id === customer.id) return false;
-            const candidate = field === "phone" ? phoneSchema.safeParse(other.phone) : identitySchema.shape.email.safeParse(other.email);
-            return candidate.success && candidate.data === value;
+      const detail = (await this.detail(id));
+      if (detail.messages.some(m => m.status === "pending")) throw new ApiError(409, "MESSAGE_IN_PROGRESS", "Hay un mensaje en proceso para esta oportunidad.");
+      const existing = detail.messages.find(m => m.role === "user" && m.requestId === requestId);
+      if (existing && existing.text !== text) throw new ApiError(409, "REQUEST_ID_CONFLICT", "requestId ya corresponde a otro texto.");
+      if (existing && detail.messages.slice(detail.messages.indexOf(existing) + 1).some(m => m.role === "user")) throw new ApiError(409, "STALE_REQUEST", "Este mensaje tiene mensajes posteriores; no se puede reintentar.");
+      if (existing?.status === "complete") return detail;
+      if (existing?.status === "pending") throw new ApiError(409, "MESSAGE_IN_PROGRESS", "El mensaje sigue en proceso.");
+      const message: Message = { ...existing, id: existing?.id ?? randomUUID(), conversationId: detail.conversation.id, role: "user", text, requestId, createdAt: existing?.createdAt ?? this.now(), status: "pending" };
+      delete message.error;
+      let stage = "save_message";
+      try {
+        (await this.repo.transaction(async () => {
+          (await this.repo.put("messages", message));
+          (await this.followups.sync((await this.detail(id)))); // Cancel the previous cycle as soon as a reply is received.
+        }));
+        stage = "agent";
+        if (!this.agent.configured) throw new ApiError(503, "AI_NOT_CONFIGURED", "Configura el proveedor de IA para procesar mensajes.");
+        const raw = await this.agent.respond({ contact: detail.customer, vehicleId: detail.opportunity.vehicleId, answers: detail.opportunity.answers, collection: detail.opportunity.collection ?? {}, messages: detail.messages.filter(m => m.id !== message.id && !m.followupTaskId), proposals: detail.opportunity.proposals, pendingQuestion: detail.opportunity.pendingQuestion }, text);
+        stage = "validate_output";
+        const output = agentOutputSchema.parse(raw);
+        return (await this.repo.transaction(async () => {
+          const current = (await this.detail(id));
+          const customer = current.customer;
+          const opportunity = current.opportunity;
+          const assistantId = randomUUID();
+          stage = "apply_updates";
+          const otherCustomers = await this.repo.all("customers");
+          const changes = applyUpdates(current, output, message, assistantId, (field, value) => {
+            const conflict = otherCustomers.some(other => {
+              if (other.id === customer.id) return false;
+              const candidate = field === "phone" ? phoneSchema.safeParse(other.phone) : identitySchema.shape.email.safeParse(other.email);
+              return candidate.success && candidate.data === value;
+            });
+            if (conflict) throw new ApiError(409, "CONTACT_CONFLICT", "El teléfono o correo pertenece a otro cliente. No se modificó ningún contacto.");
           });
-          if (conflict) throw new ApiError(409, "CONTACT_CONFLICT", "El teléfono o correo pertenece a otro cliente. No se modificó ningún contacto.");
-        });
-        const rules = this.repo.all("rules").at(-1)!;
-        const evaluation = calculate(opportunity.answers, rules, opportunity.collection);
-        const now = this.now();
-        stage = "persist_result";
-        Object.assign(opportunity, { score: evaluation.score, grade: evaluation.grade, ruleVersion: rules.version, status: evaluation.score === null ? "conversing" : "qualified", updatedAt: now, lastInteraction: now, revision: opportunity.revision + 1 });
-        customer.updatedAt = now;
-        this.repo.put("customers", customer);
-        this.repo.put("opportunities", opportunity);
-        this.repo.put("messages", { ...message, status: "complete" });
-        this.repo.put("messages", { id: assistantId, conversationId: detail.conversation.id, role: "assistant", text: changes.response, status: "complete", requestId, createdAt: now });
-        this.repo.put("evaluations", { id: randomUUID(), opportunityId: id, ...evaluation, ruleVersion: rules.version, createdAt: now });
-        this.repo.put("events", { id: randomUUID(), opportunityId: id, type: "message_processed", description: "Actualizaciones del mensaje validadas.", createdAt: now, data: { messageId: message.id, requestId, accepted: changes.accepted, rejected: changes.rejected, transitions: changes.transitions, proposals: changes.proposalEvents, collection: opportunity.collection } });
-        return this.detail(id);
-      });
-    } catch (error) {
-      const apiError = error instanceof ApiError ? error : new ApiError(502, "AI_PROCESSING_FAILED", "No se pudo procesar el mensaje. Reintenta con el mismo requestId y texto.");
-      this.repo.transaction(() => {
-        this.repo.put("messages", { ...message, status: "error", error: apiError.code });
-        this.repo.put("events", { id: randomUUID(), opportunityId: id, type: "message_failed", description: apiError.code, createdAt: this.now(), data: { messageId: message.id, requestId } });
-      });
-      const metadata = error as { status?: unknown; request_id?: unknown; requestID?: unknown } | null;
-      const knownCategories = ["AI_RESPONSE_TRUNCATED", "AI_RESPONSE_MISSING", "AI_RESPONSE_INVALID_JSON", "AI_NOT_CONFIGURED"];
-      const category = error instanceof Error && knownCategories.includes(error.message) ? error.message : error instanceof z.ZodError ? "AI_RESPONSE_INVALID_SCHEMA" : apiError.code;
-      const providerId = metadata?.requestID ?? metadata?.request_id;
-      console.error("Fallo de procesamiento", { category, stage, ...(typeof metadata?.status === "number" ? { httpStatus: metadata.status } : {}), ...(typeof providerId === "string" && /^[\w-]{1,200}$/.test(providerId) ? { providerRequestId: providerId } : {}) });
-      throw apiError;
+          const now = this.now();
+          stage = "persist_result";
+          Object.assign(opportunity, { score: null, grade: null, ruleVersion: null, status: "conversing", updatedAt: now, lastInteraction: now, revision: opportunity.revision + 1 });
+          customer.updatedAt = now;
+          (await this.repo.put("customers", customer));
+          (await this.repo.put("opportunities", opportunity));
+          (await this.repo.put("messages", { ...message, status: "complete" }));
+          (await this.repo.put("messages", { id: assistantId, conversationId: detail.conversation.id, role: "assistant", text: changes.response, status: "complete", requestId, createdAt: now }));
+          (await this.repo.put("events", { id: randomUUID(), opportunityId: id, type: "message_processed", description: "Actualizaciones del mensaje validadas.", createdAt: now, data: { messageId: message.id, requestId, accepted: changes.accepted, rejected: changes.rejected, transitions: changes.transitions, proposals: changes.proposalEvents, collection: opportunity.collection } }));
+          (await enqueueLeadSyncSnapshot(this.repo, (await this.detail(id)), now));
+          (await this.followups.sync((await this.detail(id)), now));
+          return (await this.detail(id));
+        }));
+      } catch (error) {
+        const apiError = error instanceof ApiError ? error : new ApiError(502, "AI_PROCESSING_FAILED", "No se pudo procesar el mensaje. Reintenta con el mismo requestId y texto.");
+        (await this.repo.transaction(async () => {
+          (await this.repo.put("messages", { ...message, status: "error", error: apiError.code }));
+          (await this.repo.put("events", { id: randomUUID(), opportunityId: id, type: "message_failed", description: apiError.code, createdAt: this.now(), data: { messageId: message.id, requestId } }));
+        }));
+        const metadata = error as { status?: unknown; request_id?: unknown; requestID?: unknown } | null;
+        const knownCategories = ["AI_RESPONSE_TRUNCATED", "AI_RESPONSE_MISSING", "AI_RESPONSE_INVALID_JSON", "AI_NOT_CONFIGURED"];
+        const category = error instanceof Error && knownCategories.includes(error.message) ? error.message : error instanceof z.ZodError ? "AI_RESPONSE_INVALID_SCHEMA" : apiError.code;
+        const providerId = metadata?.requestID ?? metadata?.request_id;
+        console.error("Fallo de procesamiento", { category, stage, ...(typeof metadata?.status === "number" ? { httpStatus: metadata.status } : {}), ...(typeof providerId === "string" && /^[\w-]{1,200}$/.test(providerId) ? { providerRequestId: providerId } : {}) });
+        throw apiError;
+      }
     } finally {
       this.active.delete(id);
     }
   }
 
-  createConversation(): Detail {
-    return this.repo.transaction(() => {
+  async createConversation(): Promise<Detail> {
+    await this.ready;
+    return (await this.repo.transaction(async () => {
       const now = this.now();
 
       const customer: Customer = {
@@ -192,6 +208,7 @@ export class CRMService {
         createdAt: now,
         updatedAt: now,
         lastInteraction: now,
+        nextActionCode: "collect_name",
         revision: 0,
       };
 
@@ -201,11 +218,11 @@ export class CRMService {
         createdAt: now,
       };
 
-      this.repo.put("customers", customer);
-      this.repo.put("opportunities", opportunity);
-      this.repo.put("conversations", conversation);
+      (await this.repo.put("customers", customer));
+      (await this.repo.put("opportunities", opportunity));
+      (await this.repo.put("conversations", conversation));
 
-      this.repo.put("messages", {
+      (await this.repo.put("messages", {
         id: randomUUID(),
         conversationId: conversation.id,
         role: "assistant",
@@ -217,22 +234,24 @@ export class CRMService {
           "¿Cómo te llamas?",
         status: "complete",
         createdAt: now,
-      });
+      }));
 
-      this.repo.put("events", {
+      (await this.repo.put("events", {
         id: randomUUID(),
         opportunityId: opportunity.id,
         type: "conversation_started",
         description: "Conversación de demostración iniciada.",
         createdAt: now,
-      });
+      }));
 
-      return this.detail(opportunity.id);
-    });
+      (await enqueueLeadSyncSnapshot(this.repo, (await this.detail(opportunity.id)), now));
+      return (await this.detail(opportunity.id));
+    }));
   }
 
-  detail(id: string): Detail {
-    const opportunity = this.repo.get("opportunities", id);
+  async detail(id: string): Promise<Detail> {
+    await this.ready;
+    const opportunity = (await this.repo.get("opportunities", id));
 
     if (!opportunity) {
       throw new ApiError(
@@ -242,13 +261,13 @@ export class CRMService {
       );
     }
 
-    const customer = this.repo.get(
+    const customer = (await this.repo.get(
       "customers",
       opportunity.customerId,
-    );
+    ));
 
-    const conversation = this.repo
-      .all("conversations")
+    const conversation = (await this.repo
+      .all("conversations"))
       .find((item) => item.opportunityId === id);
 
     if (!customer || !conversation) {
@@ -260,21 +279,24 @@ export class CRMService {
     }
 
     return {
-      opportunity,
+      opportunity: withoutLocalScoring(opportunity),
       customer,
       conversation,
-      messages: this.repo
-        .all("messages")
+      messages: (await this.repo
+        .all("messages"))
         .filter((item) => item.conversationId === conversation.id),
-      evaluations: this.repo
-        .all("evaluations")
+      evaluations: [],
+      events: (await this.repo
+        .all("events"))
         .filter((item) => item.opportunityId === id),
-      events: this.repo
-        .all("events")
-        .filter((item) => item.opportunityId === id),
-      tasks: this.repo
-        .all("tasks")
+      tasks: (await this.repo
+        .all("tasks"))
         .filter((item) => item.opportunityId === id),
     };
   }
+}
+
+function withoutLocalScoring(opportunity: Opportunity): Opportunity {
+  return { ...opportunity, score: null, grade: null, ruleVersion: null,
+    status: opportunity.status === "qualified" ? "conversing" : opportunity.status };
 }

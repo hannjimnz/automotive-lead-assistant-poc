@@ -1,5 +1,7 @@
 # React + TypeScript + Vite
 
+La API guarda el estado del chatbot en Supabase mediante el SDK. Configura `SUPABASE_URL` y `SUPABASE_SECRET_KEY` en `.env`; consulta [SUPABASE_PERSISTENCIA.md](SUPABASE_PERSISTENCIA.md) para la configuración e importación desde SQLite.
+
 This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
 
 Currently, two official plugins are available:

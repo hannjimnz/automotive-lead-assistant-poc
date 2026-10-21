@@ -32,6 +32,7 @@ async function request<T = Detail>(path: string, options: RequestInit = {}): Pro
 }
 
 export const api = {
+  simulateFollowup: (id: string, attempt: 1 | 2, cycleId: string) => request(`/api/opportunities/${encodeURIComponent(id)}/followups/simulate`, { method: 'POST', body: JSON.stringify({ attempt, cycleId }) }),
   campaignEvents: (signal?: AbortSignal) => request<CampaignAccessList>('/api/campaign-events', { signal, cache: 'no-store' }),
   opportunities: (signal?: AbortSignal) => request<OpportunityListItem[]>('/api/opportunities', { signal }),
   createConversation: () => request('/api/conversations', { method: 'POST' }),

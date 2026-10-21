@@ -57,6 +57,19 @@ test('hola soy alexa atraviesa SDK, JSON, Zod, actualizaciones y SQLite sin red'
       calls++;
       const body = JSON.parse(String(init?.body));
       assertSupportedSchema(body.output_config.format.schema);
+      const instructions = JSON.stringify(body.system);
+      assert.match(instructions, /no figura en ese catálogo/);
+      assert.match(instructions, /No sustituyas su elección/);
+      assert.match(instructions, /registra cada uno por separado/);
+      assert.match(instructions, /contacto inválido y otros datos válidos/);
+      assert.match(instructions, /Si además plantea/);
+      assert.match(instructions, /sin signos de interrogación, con errores de escritura/);
+      assert.match(instructions, /registra la consulta completa en un solo/);
+      assert.match(instructions, /no inventes disponibilidad ni precio/);
+      assert.match(instructions, /Una respuesta sin una pregunta real no se registra como duda/);
+      assert.match(instructions, /No afirmes que quedaron registrados hasta/);
+      assert.match(instructions, /una a cuatro semanas corresponde a timeframe/);
+      assert.match(instructions, /No son versiones unos de otros/);
       assert.equal(body.model, 'offline-model');
       assert.deepEqual(body.messages.at(-1), { role: 'user', content: 'hola soy alexa' });
       return reply(payload);
@@ -65,7 +78,7 @@ test('hola soy alexa atraviesa SDK, JSON, Zod, actualizaciones y SQLite sin red'
   const repo = new SqliteRepository(':memory:');
   try {
     const service = new CRMService(repo, new AnthropicAgent({ client, model: 'offline-model' }));
-    const id = service.createConversation().opportunity.id;
+    const id = (await service.createConversation()).opportunity.id;
     const result = await service.sendMessage(id, { text: 'hola soy alexa', requestId: 'alexa-offline' });
     assert.equal(result.customer.name, 'Alexa');
     assert.equal(result.opportunity.collection.name, 'answered');
@@ -73,10 +86,10 @@ test('hola soy alexa atraviesa SDK, JSON, Zod, actualizaciones y SQLite sin red'
     assert.equal(result.messages[1].text, 'hola soy alexa');
     assert.equal(result.messages[1].requestId, 'alexa-offline');
     assert.equal(result.messages[2].text, payload.message);
-    assert.equal(result.evaluations.length, 1);
+    assert.equal(result.evaluations.length, 0);
     await service.sendMessage(id, { text: 'hola soy alexa', requestId: 'alexa-offline' });
     assert.equal(calls, 1);
-  } finally { repo.close(); }
+  } finally { (await repo.close()); }
 });
 
 test('HTTP 400 simulado conserva mensaje/requestId y permite reintento sin duplicados', async (t) => {
@@ -94,12 +107,12 @@ test('HTTP 400 simulado conserva mensaje/requestId y permite reintento sin dupli
   const repo = new SqliteRepository(':memory:');
   try {
     const service = new CRMService(repo, new AnthropicAgent({ client, model: 'offline-model' }));
-    const id = service.createConversation().opportunity.id;
+    const id = (await service.createConversation()).opportunity.id;
     const input = { text: 'hola soy alexa', requestId: 'retry-original' };
     await assert.rejects(service.sendMessage(id, input), error => error instanceof ApiError && error.code === 'AI_PROCESSING_FAILED');
     assert.deepEqual(log.mock.calls[0].arguments[1], { category: 'AI_PROCESSING_FAILED', stage: 'agent', httpStatus: 400, providerRequestId: 'req_offline_schema' });
     assert.doesNotMatch(JSON.stringify(log.mock.calls[0].arguments), /offline-test-placeholder|hola soy alexa|unsupported maxItems/);
-    const failed = service.detail(id);
+    const failed = (await service.detail(id));
     assert.equal(failed.messages[1].status, 'error');
     assert.equal(failed.customer.name, undefined);
     assert.equal(failed.evaluations.length, 0);
@@ -112,5 +125,5 @@ test('HTTP 400 simulado conserva mensaje/requestId y permite reintento sin dupli
     assert.equal(retried.messages[1].createdAt, original.createdAt);
     assert.equal(retried.messages[1].text, original.text);
     assert.equal(retried.customer.name, 'Alexa');
-  } finally { repo.close(); }
+  } finally { (await repo.close()); }
 });

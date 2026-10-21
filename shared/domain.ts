@@ -78,6 +78,11 @@ export type CollectionField =
 export type CollectionProgress =
   Partial<Record<CollectionField, CollectionStatus>>;
 
+export type NextActionCode =
+  | "confirm_proposed_data"
+  | `collect_${CollectionField}`
+  | "request_recorded"
+  | "review_with_advisor";
 
 export type Status = keyof typeof labels.status;
 export type Grade = "green" | "yellow" | "red";
@@ -110,6 +115,7 @@ export interface Opportunity {
   grade: Grade | null;
   ruleVersion: number | null;
   nextAction: string;
+  nextActionCode?: NextActionCode;
   createdAt: string;
   updatedAt: string;
   lastInteraction: string;
@@ -117,7 +123,17 @@ export interface Opportunity {
   pendingIdentity?: Partial<Pick<Customer, "name" | "phone" | "email">>;
   revision: number;
   proposals?: DataProposal[];
-  pendingQuestion?: { fields: CollectionField[]; messageId: string };
+  pendingQuestion?: {
+    fields: CollectionField[];
+    messageId: string;
+    stagedTradeInDetails?: StagedTradeInDetail[];
+  };
+}
+export interface StagedTradeInDetail {
+  field: "tradeInBrand" | "tradeInModel" | "tradeInYear";
+  value: string;
+  quote: string;
+  sourceMessageId: string;
 }
 export interface DataProposal {
   id: string;
@@ -144,6 +160,7 @@ export interface Message {
   status: "pending" | "complete" | "error";
   requestId?: string;
   error?: string;
+  followupTaskId?: string;
 }
 export interface Evaluation {
   id: string;
@@ -172,8 +189,14 @@ export interface Task {
   opportunityId: string;
   attempt: 1 | 2;
   dueAt: string;
-  status: "pending" | "completed" | "cancelled";
+  status: "pending" | "completed" | "cancelled" | "skipped";
   completedAt?: string;
+  kind?: "followup";
+  cycleId?: string;
+  anchorMessageId?: string;
+  mode?: "automatic" | "simulated";
+  messageId?: string;
+  reason?: string;
 }
 export interface Rules {
   id: string;
@@ -421,6 +444,7 @@ export function commercialSummary(o:Opportunity) {
     a.downPayment!==undefined?`Enganche declarado: ${formatMXN(a.downPayment)}.`:null,
     a.budget!==undefined?`Presupuesto declarado: ${formatMXN(a.budget)}.`:null,
     a.tradeIn!==undefined?(a.tradeIn?'Tiene vehículo a cuenta.':'Sin vehículo a cuenta.'):null,
+    a.questions && a.questions !== noQuestionsValue?`Dudas para el asesor: ${a.questions}.`:null,
     a.branch?`${catalog.branches.find(b=>b.id===a.branch)?.name??a.branch}.`:null,
     a.action?`Solicitud registrada: ${labels.action[a.action].toLowerCase()}; pendiente de confirmación.`:null,
     `Siguiente paso: ${o.nextAction.toLowerCase()}.`,

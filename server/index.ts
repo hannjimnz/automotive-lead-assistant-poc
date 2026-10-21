@@ -7,47 +7,58 @@ import type {
   NextFunction,
 } from "express";
 
-import { SqliteRepository } from "./repository.js";
+import { createSupabaseRepository } from "./supabase-repository.js";
 import { ApiError, CRMService } from "./service.js";
 import { campaignRoutes } from "./campaigns.js";
+import { frontendRoutes } from "./frontend.js";
+import { followupRoutes } from "./followup-routes.js";
+import { createLeadSyncWorker } from "./lead-sync.js";
 
 const app = express();
 
-const repo = new SqliteRepository(
-  process.env.DATABASE_PATH || "data/pasa.sqlite",
-);
+const repo = createSupabaseRepository();
+await repo.verify();
 
 const service = new CRMService(repo);
+await service.ready;
+const leadSyncWorker = (await createLeadSyncWorker(repo));
 
 app.use(express.json({ limit: "32kb" }));
 app.use(campaignRoutes(repo));
+app.use(followupRoutes(service));
 
-app.get("/api/health", (_req, res) => {
+app.get("/api/health", async (_req, res) => {
   res.json({
     status: "ok",
     database: "connected",
+    prospectSync: {
+      enabled: leadSyncWorker !== undefined,
+      ...(await repo.leadSyncCounts()),
+    },
   });
 });
 
 // Inicia una nueva conversación.
-app.post("/api/conversations", (_req, res) => {
-  const detail = service.createConversation();
+app.post("/api/conversations", async (_req, res) => {
+  const detail = (await service.createConversation());
   res.status(201).json(detail);
 });
 
 // Recupera una conversación por su oportunidad.
-app.get("/api/opportunities", (_req, res) => {
-  res.json(service.listOpportunities());
+app.get("/api/opportunities", async (_req, res) => {
+  res.json((await service.listOpportunities()));
 });
 
-app.get("/api/opportunities/:id", (req, res) => {
+app.get("/api/opportunities/:id", async (req, res) => {
   const id = String(req.params.id);
-  res.json(service.detail(id));
+  res.json((await service.detail(id)));
 });
 
 app.post("/api/opportunities/:id/messages", async (req, res) => {
   res.json(await service.sendMessage(String(req.params.id), req.body));
 });
+
+app.use(frontendRoutes());
 
 // Manejo centralizado de errores.
 app.use(
@@ -85,13 +96,24 @@ app.use(
 
 const server = app.listen(3001, "127.0.0.1", () => {
   console.log("PASA API: http://127.0.0.1:3001");
-  console.log("SQLite y servicio disponibles.");
+  console.log("Supabase PostgreSQL y servicio disponibles.");
 });
 
+async function runFollowups() {
+  try { (await service.followups.tick()); }
+  catch (error) { console.error('Fallo de seguimiento', { category: 'FOLLOWUP_EXECUTION_FAILED', type: error instanceof Error ? error.name : 'UnknownError' }); }
+}
+runFollowups(); // Recover overdue persisted tasks on startup.
+const followupTimer = setInterval(runFollowups, 30_000);
+followupTimer.unref();
+
 function shutdown() {
-  server.close(() => {
-    repo.close();
-    process.exit(0);
+  clearInterval(followupTimer);
+  server.close(async () => {
+    void (leadSyncWorker?.stop() ?? Promise.resolve()).finally(async () => {
+      (await repo.close());
+      process.exit(0);
+    });
   });
 }
 

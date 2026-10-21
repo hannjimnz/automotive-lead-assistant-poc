@@ -8,7 +8,6 @@ import { prospectSortOptions, type ProspectSort } from '../prospects'
 const fieldNames: Record<CollectionField, string> = {
   name: 'Nombre', phone: 'Teléfono', email: 'Correo', vehicleId: 'Vehículo', timeframe: 'Temporalidad', intention: 'Intención', capacity: 'Capacidad', budget: 'Presupuesto', payment: 'Forma de pago', downPayment: 'Enganche', tradeIn: 'Vehículo a cuenta', tradeInBrand: 'Marca a cuenta', tradeInModel: 'Modelo a cuenta', tradeInYear: 'Año a cuenta', tradeInDetails: 'Detalles a cuenta', branch: 'Sucursal', action: 'Siguiente acción', questions: 'Dudas',
 }
-const gradeNames = { green: 'Verde', yellow: 'Amarillo', red: 'Rojo' }
 export function ProspectRow({ row, blocked, selected, onOpen }: { row: OpportunityListItem; blocked: boolean; selected: boolean; onOpen: (id: string) => void }) {
   const fields = Object.entries(row.collection) as [CollectionField, string][]
   const names = (status: string) => fields.filter(([, value]) => value === status).map(([field]) => fieldNames[field]).join(', ')
@@ -16,7 +15,6 @@ export function ProspectRow({ row, blocked, selected, onOpen }: { row: Opportuni
   return <article className="prospect-row" aria-label={`Prospecto: ${displayName}`}>
     <div className="prospect-identity"><h3>{displayName}</h3><p>{row.vehicleId ? vehicleName(row.vehicleId) : 'Sin proporcionar'}</p>{selected && <span className="badge subtle">Conversación seleccionada</span>}</div>
     <dl className="prospect-summary">
-      <div><dt>Calificación</dt><dd><span className={`prospect-score ${row.score === null ? 'unclassified' : row.grade ?? 'unclassified'}`}>{row.score === null ? 'Sin clasificar' : `${row.score} puntos${row.grade ? ` · ${gradeNames[row.grade]}` : ''}`}</span><small>{row.provisional === null ? 'Provisionalidad sin registrar' : row.provisional ? 'Provisional' : 'Sin datos provisionales'}</small></dd></div>
       <div><dt>Estado</dt><dd>{labels.status[row.status]}</dd></div>
       <div className="prospect-collection"><dt>Recopilación</dt><dd><span className="collection-pending">Pendientes: {names('pending') || 'Ninguno'}</span><span>No sabe: {names('unknown') || 'Ninguno'}</span><span>Prefiere no responder: {names('declined') || 'Ninguno'}</span></dd></div>
       <div><dt>Última actividad</dt><dd><time dateTime={row.lastInteraction}>{new Intl.DateTimeFormat('es-MX', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(row.lastInteraction))}</time></dd></div>

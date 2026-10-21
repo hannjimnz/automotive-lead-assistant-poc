@@ -1,14 +1,12 @@
 import { useRef, useState } from 'react'
 import { catalog, labels, missingBlocks, vehicleName, type CollectionField, type CollectionStatus, type Detail } from '../../shared/domain'
-import { EvaluationBreakdown } from './EvaluationBreakdown'
 import { formatMXN } from '../../shared/money'
 import { formatPhone } from '../../shared/phone'
 
 const states: Record<CollectionStatus, string> = { pending: 'Pendiente', answered: 'Respondido', unknown: 'No sabe', declined: 'Prefiere no responder', not_applicable: 'No aplica' }
-const grades = { green: 'Verde', yellow: 'Amarillo', red: 'Rojo' }
 const money = (value?: number) => value === undefined ? undefined : formatMXN(value)
 const date = (value: string) => new Intl.DateTimeFormat('es-MX', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value))
-const tabs = ['Información', 'Calificación', 'Historial'] as const
+const tabs = ['Información', 'Recopilación', 'Historial'] as const
 
 function Field({ label, value, status }: { label: string; value?: string; status?: CollectionStatus }) {
   const resolved = status ?? (value !== undefined ? 'answered' : 'pending')
@@ -21,9 +19,6 @@ export function CommercialCard({ detail }: { detail: Detail | null }) {
   const o = detail?.opportunity
   const a = o?.answers
   const field = (key: CollectionField, label: string, value?: string) => <Field key={key} label={label} value={value} status={o?.collection?.[key]} />
-  const latest = detail?.evaluations.at(-1)
-  const score = latest ? latest.score : o?.score ?? null
-  const grade = latest ? latest.grade : o?.grade
   const pending = o ? missingBlocks(o.answers, o.collection) : []
   const contactPending = o ? (['name', 'phone', 'email', 'vehicleId'] as const).filter(key => o.collection?.[key] === 'pending' || (!o.collection?.[key] && !(key === 'vehicleId' ? o.vehicleId : detail?.customer[key]))) : []
   return <section className="card commercial" aria-labelledby="card-title">
@@ -49,16 +44,11 @@ export function CommercialCard({ detail }: { detail: Detail | null }) {
             {field('branch', 'Sucursal', a.branch ? catalog.branches.find(b => b.id === a.branch)?.name ?? a.branch : undefined)}{field('action', 'Acción solicitada', a.action ? labels.action[a.action] : undefined)}{field('questions', 'Dudas del cliente', a.questions)}<Field label="Siguiente paso registrado" value={o.nextAction} />
           </dl><p className="footnote">La acción solicitada no confirma una cita ni una reserva.</p>
         </>}
-        {tab === 'Calificación' && <>
-          <div className={`score-box ${score === null ? 'unclassified' : grade ?? 'unclassified'}`}><p className="eyebrow">Clasificación comercial</p><strong>{score === null ? 'Sin clasificar' : `${score} / 100`}</strong><span>{score === null ? 'Faltan criterios por abordar para calcular la puntuación.' : grade ? `Clasificación ${grades[grade].toLowerCase()}` : 'Sin color registrado'}</span></div>
-          {score !== null && latest?.provisional && <p className="provisional-notice" role="status">Calificación provisional: hay datos desconocidos o no proporcionados</p>}
-          <h3>Última evaluación</h3>{latest ? <><EvaluationBreakdown evaluation={latest} /><p className="footnote">Reglas v{latest.ruleVersion} · {date(latest.createdAt)}</p></> : <p className="muted">Todavía no hay evaluaciones guardadas.</p>}
-          <div className="notice"><strong>Reglas de demostración</strong><p>La puntuación usa temporalidad, intención y capacidad declarada. No asigna puntos por vehículo ni constituye una evaluación crediticia.</p></div>
-          <h3>Recopilación de información</h3><p>La clasificación y los datos pendientes se muestran por separado.</p>{pending.length || contactPending.length ? <ul className="pending-list">{contactPending.length > 0 && <li>Contacto y vehículo de interés ({contactPending.length} campos)</li>}{pending.map(block => <li key={block}>{block}</li>)}</ul> : <p className="muted">No hay bloques pendientes. Los campos desconocidos o rechazados conservan su estado.</p>}
+        {tab === 'Recopilación' && <>
+          <h3>Recopilación de información</h3>{pending.length || contactPending.length ? <ul className="pending-list">{contactPending.length > 0 && <li>Contacto y vehículo de interés ({contactPending.length} campos)</li>}{pending.map(block => <li key={block}>{block}</li>)}</ul> : <p className="muted">No hay bloques pendientes. Los campos desconocidos o rechazados conservan su estado.</p>}
         </>}
         {tab === 'Historial' && <>
           <h3>Eventos guardados</h3><ol className="timeline">{[...detail.events].reverse().map(event => <li key={event.id}><strong>{event.type === 'message_failed' ? 'Mensaje no procesado' : event.description}</strong>{event.type === 'message_failed' && <span>El intento quedó registrado; consulta el estado en el chat.</span>}<time dateTime={event.createdAt}>{date(event.createdAt)}</time></li>)}</ol>
-          <h3>Evaluaciones guardadas</h3>{detail.evaluations.length ? <ol className="timeline">{[...detail.evaluations].reverse().map(evaluation => <li key={evaluation.id}><strong>{evaluation.score === null ? 'Sin clasificar' : `${evaluation.score} puntos · ${evaluation.grade ? grades[evaluation.grade] : 'Sin color'}`}</strong>{evaluation.provisional && <span>Datos provisionales</span>}<span>Reglas v{evaluation.ruleVersion}</span><EvaluationBreakdown evaluation={evaluation} /><time dateTime={evaluation.createdAt}>{date(evaluation.createdAt)}</time></li>)}</ol> : <p className="muted">Todavía no hay evaluaciones.</p>}
         </>}
       </>}
     </div>

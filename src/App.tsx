@@ -7,6 +7,7 @@ import { Prospects } from './components/Prospects'
 import { openOpportunity } from './openOpportunity'
 import { ThemeToggle } from './components/ThemeToggle'
 import { CampaignEvents } from './components/CampaignEvents'
+import { FollowupControls } from './components/FollowupControls'
 import './App.css'
 
 const errorMessage = (error: unknown) => error instanceof Error ? error.message : 'No se pudo completar la operación.'
@@ -94,7 +95,43 @@ function App() {
   }, [session.opportunityId])
 
   useEffect(() => { endRef.current?.scrollIntoView({ block: 'nearest', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' }) }, [detail?.messages.length, busy, session.pending])
-  useEffect(() => { if (view === 'Chat' && detail && verified && !busy && !loading && !serverPending && !session.pending) inputRef.current?.focus() }, [view, detail, verified, busy, loading, serverPending, session.pending])
+  useEffect(() => { if (view === 'Chat' && verified && !busy && !loading && !serverPending && !session.pending) inputRef.current?.focus() }, [view, session.opportunityId, verified, busy, loading, serverPending, session.pending])
+
+  // Read only the visible chat, with no overlapping polls or writes to drafts/pending sends.
+  useEffect(() => {
+    const id = session.opportunityId
+    if (view !== 'Chat' || !id) return
+    let cancelled = false
+    let polling = false
+    const controller = new AbortController()
+    const timer = setInterval(async () => {
+      if (cancelled || polling || locked.current || sessionRef.current.pending || document.visibilityState !== 'visible') return
+      const version = generation.current
+      polling = true
+      try {
+        const next = await api.detail(id, controller.signal)
+        if (!cancelled && version === generation.current && !locked.current && !sessionRef.current.pending && next.opportunity.id === sessionRef.current.opportunityId) {
+          setDetail(previous => previous && (previous.opportunity.revision > next.opportunity.revision || (previous.opportunity.revision === next.opportunity.revision && previous.messages.length === next.messages.length && JSON.stringify(previous.tasks) === JSON.stringify(next.tasks))) ? previous : next)
+        }
+      } catch { /* Existing explicit refresh remains available if a background read fails. */ }
+      finally { polling = false }
+    }, 10_000)
+    return () => { cancelled = true; controller.abort(); clearInterval(timer) }
+  }, [view, session.opportunityId])
+
+  async function simulateFollowup(attempt: 1 | 2, cycleId: string) {
+    const id = sessionRef.current.opportunityId
+    if (!id || locked.current || switchBlocked || sessionRef.current.pending) return
+    locked.current = true
+    generation.current++
+    setBusy(true)
+    setError('')
+    try { acceptDetail(await api.simulateFollowup(id, attempt, cycleId)) }
+    catch (failure) {
+      setError(errorMessage(failure))
+      try { acceptDetail(await api.detail(id)) } catch { /* Preserve the current conversation and error. */ }
+    } finally { locked.current = false; setBusy(false) }
+  }
 
   function changeDraft(text: string) {
     setDraft(text)
@@ -206,7 +243,7 @@ function App() {
           <form onSubmit={event => { event.preventDefault(); void send() }}><label htmlFor="message">Tu mensaje</label><div className="composer"><textarea ref={inputRef} id="message" value={draft} onChange={event => changeDraft(event.target.value)} placeholder="Escribe aquí lo que estás buscando…" rows={2} maxLength={8000} disabled={cannotSend} /><button className="primary" type="submit" disabled={cannotSend || !draft.trim()}>Enviar <span aria-hidden="true">↗</span></button></div><p className="footnote">Demo local. Las condiciones comerciales se confirman con un asesor.</p></form>
         </div>
       </section>
-      <CommercialCard detail={detail} />
+      <div><CommercialCard detail={detail} />{detail && <FollowupControls detail={detail} blocked={switchBlocked || Boolean(session.pending)} onSimulate={(attempt, cycleId) => void simulateFollowup(attempt, cycleId)} />}</div>
     </main>
     <footer className="app-footer">PASA · Demostración de atención comercial <span>Datos y reglas de ejemplo</span></footer>
   </div>
