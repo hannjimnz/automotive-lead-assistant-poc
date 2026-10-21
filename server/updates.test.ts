@@ -4,6 +4,7 @@ import { CRMService, ApiError } from './service.js';
 import { SqliteRepository } from './repository.js';
 import type { AgentOutput, ChatAgent } from './agent.js';
 import { fieldLabels } from './updates.js';
+import { missingBlocks, type Detail } from '../shared/domain.js';
 
 type Update = AgentOutput['updates'][number];
 const u = (field: Update['field'], value: string | null, quote: string, status: Update['status'] = 'answered', mode: Update['mode'] = 'apply'): Update => ({ field, value, quote, status, mode });
@@ -43,6 +44,160 @@ const cases: [Update['field'], string, string, string][] = [
   ['action', 'call', 'later', 'reserva-real'],
   ['questions', 'Tengo una duda', 'Tengo otra duda', 'x'.repeat(2001)],
 ];
+
+function assertContactAdvance(d: Detail, fields: ('phone' | 'email')[], next: 'email' | 'timeframe') {
+  for (const field of fields) {
+    assert.equal(d.customer[field], undefined);
+    assert.equal(d.opportunity.collection[field], 'declined');
+    assert.ok(!d.opportunity.pendingQuestion?.fields.includes(field));
+  }
+  assert.equal(d.customer.name, 'Ana');
+  assert.equal(d.opportunity.vehicleId, 'lobo');
+  assert.deepEqual(d.opportunity.pendingQuestion?.fields, [next]);
+  assert.equal(d.opportunity.nextActionCode, `collect_${next}`);
+  assert.equal(d.opportunity.nextAction, `Recopilar: ${fieldLabels[next]}`);
+  assert.ok(missingBlocks(d.opportunity.answers, d.opportunity.collection).includes('temporalidad'));
+  assert.doesNotMatch(d.messages.at(-1)!.text, /qué dato quieres corregir/i);
+  for (const field of fields) assert.doesNotMatch(d.messages.at(-1)!.text, new RegExp(fieldLabels[field], 'i'));
+}
+
+test('alcance aprobado: secuencia teléfono y correo con tampoco avanza sin insistir', async () => {
+  const f = await setup();
+  try {
+    await f.send('Ana Lobo', [u('name', 'Ana', 'Ana'), u('vehicleId', 'lobo', 'Lobo')], { message: '¿Cuál es tu teléfono?', questionFields: ['phone'] });
+    let d = await f.send('nop, no quiero');
+    assertContactAdvance(d, ['phone'], 'email');
+    assert.equal(d.messages.at(-1)!.text, 'Entendido, no hace falta compartirlo. ¿Cuál es tu correo electrónico completo? También puedes decirme si prefieres no compartirlo.');
+    d = await f.send('nop, tampoco quiero compartirlo', [], { message: '¿Qué dato quieres corregir?' });
+    assertContactAdvance(d, ['phone', 'email'], 'timeframe');
+    d = await f.send('gracias', [], { message: '¿Cuál es tu correo?', questionFields: ['email'] });
+    assert.equal(d.opportunity.collection.phone, 'declined');
+    assert.equal(d.opportunity.collection.email, 'declined');
+    assert.equal(d.opportunity.nextActionCode, 'collect_timeframe');
+    assert.equal(d.opportunity.nextAction, 'Recopilar: temporalidad');
+    assert.equal(d.opportunity.pendingQuestion, undefined);
+    assert.doesNotMatch(d.messages.at(-1)!.text, /teléfono|correo|corregir/i);
+  } finally { await f.repo.close(); }
+});
+
+for (const field of ['phone', 'email'] as const) for (const refusal of ['no', 'nop, tampoco quiero compartirlo']) test(`alcance aprobado: único contacto ${field}, rechazo ${refusal}`, async () => {
+  const f = await setup();
+  try {
+    const other = field === 'phone' ? 'email' : 'phone';
+    const value = other === 'phone' ? '3521455896' : 'ana@example.com';
+    await f.send(`Ana Lobo ${value}`, [u('name', 'Ana', 'Ana'), u('vehicleId', 'lobo', 'Lobo'), u(other, value, value)], { message: field === 'email' ? '¿Cuál es tu correo electrónico completo? También puedes decirme si prefieres no compartirlo.' : '¿Cuál es tu teléfono?', questionFields: [field] });
+    const d = await f.send(refusal, [], { message: '¿Qué dato quieres corregir?' });
+    assertContactAdvance(d, [field], 'timeframe');
+    assert.equal(d.customer[other], value);
+    assert.equal(d.opportunity.collection[other], 'answered');
+  } finally { await f.repo.close(); }
+});
+
+for (const field of ['phone', 'email'] as const) test(`alcance aprobado: negativa breve conserva ${field} guardado y rechazo de propuesta`, async () => {
+  const f = await setup();
+  const value = field === 'phone' ? '3521455896' : 'ana@example.com';
+  const candidate = field === 'phone' ? '5512345678' : 'otra@example.com';
+  try {
+    await f.send(value, [u(field, value, value)]);
+    await f.send('hola', [], { message: '¿Quieres compartirlo?', questionFields: [field] });
+    let d = await f.send('nop, no quiero', [u(field, null, 'nop, no quiero', 'declined')]);
+    assert.equal(d.customer[field], value);
+    assert.equal(d.opportunity.collection[field], 'answered');
+    await f.send(candidate, [u(field, candidate, candidate, 'answered', 'propose')]);
+    d = await f.send('no');
+    assert.equal(d.customer[field], value);
+    assert.equal(d.opportunity.collection[field], 'answered');
+    assert.equal(d.opportunity.proposals!.at(-1)!.status, 'rejected');
+    assert.equal(d.opportunity.pendingQuestion, undefined);
+    assert.match(d.messages.at(-1)!.text, /conservo/i);
+  } finally { await f.repo.close(); }
+});
+
+for (const text of ['no ninguna', 'no, ninguna', 'ninguna por ahora', 'no tengo ninguna']) for (const pending of [true, false]) test(`alcance aprobado: dudas ${text}, pendiente ${pending}`, async () => {
+  const f = await setup();
+  try {
+    await f.send('hola', [], { message: pending ? '¿Tienes dudas?' : '¿Cuál es tu nombre?', questionFields: [pending ? 'questions' : 'name'] });
+    const d = await f.send(text, [u('questions', 'Sin dudas', text)], { message: '¿Tienes dudas?', questionFields: ['questions'] });
+    assert.equal(d.opportunity.answers.questions, pending ? 'Sin dudas' : undefined);
+    assert.equal(d.opportunity.collection.questions, pending ? 'answered' : 'pending');
+    if (pending) {
+      assert.equal(d.opportunity.pendingQuestion, undefined);
+      assert.doesNotMatch(d.messages.at(-1)!.text, /\?/);
+    }
+  } finally { await f.repo.close(); }
+});
+
+test('alcance aprobado: opciones y negativa seguida de consulta no cierran dudas', async () => {
+  const f = await setup();
+  try {
+    await f.send('hola', [], { message: '¿Tienes dudas?', questionFields: ['questions'] });
+    let d = await f.send('ninguna de esas opciones', [u('questions', 'Sin dudas', 'ninguna de esas opciones')]);
+    assert.equal(d.opportunity.answers.questions, undefined);
+    await f.send('hola', [], { message: '¿Tienes dudas?', questionFields: ['questions'] });
+    const text = 'no, ninguna; pero cuánto cuesta';
+    d = await f.send(text, [u('questions', 'cuánto cuesta', 'cuánto cuesta')]);
+    assert.equal(d.opportunity.answers.questions, 'cuánto cuesta');
+    assert.equal(d.opportunity.collection.questions, 'answered');
+  } finally { await f.repo.close(); }
+});
+
+for (const stale of [false, true]) test(`alcance aprobado: negativa sin contacto único vigente, contexto obsoleto ${stale}`, async () => {
+  const f = await setup();
+  try {
+    let d = await f.send('hola', [], { message: '¿Compartes tus contactos?', questionFields: stale ? ['email'] : ['phone', 'email'] });
+    if (stale) {
+      d.opportunity.pendingQuestion!.messageId = 'old-assistant-turn';
+      await f.repo.put('opportunities', d.opportunity);
+    }
+    d = await f.send('nop, tampoco quiero compartirlo');
+    assert.equal(d.customer.phone, undefined);
+    assert.equal(d.customer.email, undefined);
+    assert.equal(d.opportunity.collection.phone, 'pending');
+    assert.equal(d.opportunity.collection.email, 'pending');
+  } finally { await f.repo.close(); }
+});
+
+test('alcance aprobado: dudas nuevas requieren pregunta vigente aunque haya consultas previas', async () => {
+  const f = await setup();
+  try {
+    await f.send('cuánto cuesta', [u('questions', 'cuánto cuesta', 'cuánto cuesta')], { message: '¿Cuál es tu nombre?', questionFields: ['name'] });
+    const d = await f.send('no ninguna', [u('questions', 'Sin dudas', 'no ninguna')]);
+    assert.equal(d.opportunity.answers.questions, 'cuánto cuesta');
+    assert.equal(d.opportunity.collection.questions, 'answered');
+  } finally { await f.repo.close(); }
+});
+
+test('alcance aprobado: ausencia de dudas se registra aunque la IA omita extraerla', async () => {
+  const f = await setup();
+  try {
+    await f.send('hola', [], { message: '¿Tienes dudas?', questionFields: ['questions'] });
+    const d = await f.send('NO, NINGUNA.', [], { message: '¿Tienes dudas?', questionFields: ['questions'] });
+    assert.equal(d.opportunity.answers.questions, 'Sin dudas');
+    assert.equal(d.opportunity.collection.questions, 'answered');
+    assert.equal(d.opportunity.pendingQuestion, undefined);
+    assert.doesNotMatch(d.messages.at(-1)!.text, /\?/);
+  } finally { await f.repo.close(); }
+});
+
+test('alcance aprobado: rechazo conserva datos independientes y contacto posterior válido', async () => {
+  const f = await setup();
+  try {
+    await f.send('hola', [], { message: '¿Cuál es tu correo?', questionFields: ['email'] });
+    const text = 'No comparto correo; soy Ana y quiero una Lobo';
+    let d = await f.send(text, [u('name', 'Ana', 'Ana'), u('vehicleId', 'lobo', 'Lobo')]);
+    assert.equal(d.customer.name, 'Ana');
+    assert.equal(d.opportunity.vehicleId, 'lobo');
+    assert.equal(d.opportunity.collection.email, 'declined');
+    assert.equal(d.customer.email, undefined);
+    assert.equal(d.opportunity.nextActionCode, 'collect_phone');
+    d = await f.send('ana@example.com', [u('email', 'ana@example.com', 'ana@example.com')]);
+    assert.equal(d.customer.email, 'ana@example.com');
+    assert.equal(d.opportunity.collection.email, 'answered');
+    assert.equal(d.opportunity.nextActionCode, 'collect_phone');
+    assert.equal(d.customer.name, 'Ana');
+    assert.equal(d.opportunity.vehicleId, 'lobo');
+  } finally { await f.repo.close(); }
+});
 
 test('brief refusal applies only to the requested contact field and allows a later update', async () => {
   for (const refusal of ['nop, no quiero', 'no gracias', 'no te lo doy']) {

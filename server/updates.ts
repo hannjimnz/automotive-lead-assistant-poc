@@ -28,7 +28,7 @@ function asksColorsAndVersions(text: string): boolean {
   const asksCatalogVehicles = /catalogo/.test(value) && /vehiculos?/.test(value) && /\b(?:aparecen|hay|incluye|muestra|lista|ofrecen)\b/.test(value);
   return !asksCatalogVehicles && /\bcolor(?:es)?\b/.test(value) && /\b(?:modelos?|versiones?|ediciones?)\b/.test(value);
 }
-const briefContactRefusal = (text: string) => /^(?:nop(?:[, ]+no quiero)?|no(?:[, ]+gracias)?|no te lo doy|no quiero|prefiero no|no deseo)[.! ]*$/.test(normalized(text));
+const briefContactRefusal = (text: string) => /^(?:nop(?:[, ]+(?:no quiero|tampoco quiero compartirlo))?|no(?:[, ]+gracias)?|no te lo doy|no quiero|prefiero no|no deseo)[.! ]*$/.test(normalized(text));
 const contactRefusal = /\b(?:no (?:doy|comparto|digo|proporciono|facilito|entrego)|(?:prefiero|quiero|deseo) no (?:dar|compartir|decir|proporcionar|facilitar)|no (?:quiero|deseo|voy a) (?:dar|compartir|proporcionar|facilitar))\b/;
 const typoBrand = (text: string) => {
   const match = text.match(/\bvolsvaguen\b/i);
@@ -65,12 +65,13 @@ function resolvedQuestions(text: string): string | undefined {
   if (/¿|\b(?:no|si|cuando)\b/.test(prefix)) return undefined;
   return match[0];
 }
-const noQuestions = (text: string, context: boolean): boolean => {
+const noQuestions = (text: string, context: boolean, pending = context): boolean => {
   const value = normalized(text).replace(/[.!]+$/g, '');
   const explicit = /^(?:(?:por ahora|de momento)[, ]+)?(?:no (?:tengo|hay|me quedan|tiene) (?:(?:ninguna?|mas) )?(?:dudas?|preguntas?)|sin (?:dudas|preguntas)|ninguna? (?:duda|pregunta))(?:(?:[, ]+(?:muchas )?gracias)|[, ]+por ahora)?$/;
   const resolution = resolvedQuestions(text);
   const clauses = value.split(/[.;!?\n]+|\b(?:y|pero|aunque)\b/).map(clause => clause.trim()).filter(Boolean);
   const shortNoMore = context && /^(?:no[, ]*)?(?:ya .+?[, ]*)?no (?:tengo|hay|me quedan) ninguna otra(?:s? (?:dudas?|preguntas?))?$/.test(value);
+  if (pending && /^(?:no[, ]+ninguna|ninguna por ahora|no tengo ninguna)(?:[, ]+gracias)?$/.test(value)) return true;
   return explicit.test(value) || Boolean(clauses.at(-1) && explicit.test(clauses.at(-1)!)) || Boolean(resolution && normalized(resolution) === value) || shortNoMore || (context && /^ningun[ao](?:[, ]+(?:muchas )?gracias)?$/.test(value));
 };
 // Compare wording only for obvious repeats; retain the original text as evidence.
@@ -164,23 +165,33 @@ export function applyUpdates(detail: Detail, output: AgentOutput, message: Messa
   // provides context for a brief answer such as "ninguna, gracias".
   const hasPreviousQuestion = Boolean(previousQuestions && previousQuestions !== noQuestionsValue);
   const questionsContext = askedField === 'questions' || hasPreviousQuestion || (!beforeQuestion && last?.role === 'assistant' && (last.text.match(/\?/g) ?? []).length === 1 && /dudas?|preguntas?/.test(normalized(last.text)));
+  // New short variants require the tracked question and a complete answer,
+  // rather than a fragment of a message that also contains a new query.
+  const pendingDoubts = askedField === 'questions' && noQuestions(message.text, false, true);
+  const acceptsNoQuestions = (text: string) => noQuestions(text, questionsContext, pendingDoubts);
   const tradeInContext = askedField === 'tradeIn' || (!beforeQuestion && last?.role === 'assistant' && (last.text.match(/\?/g) ?? []).length === 1 && /vehiculo.*a cuenta/.test(normalized(last.text)));
   const noTradeInCorrection = o.answers.tradeIn === false && normalized(message.text).replace(/[.! ]+$/g, '') === 'nada'
     && last?.role === 'assistant' && /correg|que dato/.test(normalized(last.text));
   const noTradeIn = (tradeInContext && tradeInNegative(message.text)) || noTradeInCorrection;
-  const explicitNoQuestions = noQuestions(message.text, questionsContext);
+  const explicitNoQuestions = acceptsNoQuestions(message.text);
   const resolutionQuote = hasPreviousQuestion ? resolvedQuestions(message.text) : undefined;
   const closesPreviousQuestion = hasPreviousQuestion && (Boolean(resolutionQuote) || /\bno (?:tengo|hay|me quedan) (?:mas dudas?|ninguna otra(?:s? (?:dudas?|preguntas?))?)\b/.test(normalized(message.text)));
   const weekQuote = withinThirtyDaysWeek(message.text);
-  const briefDeclinedField = ['phone', 'email'].includes(askedField ?? '') && briefContactRefusal(message.text) ? askedField as 'phone' | 'email' : undefined;
+  const briefDeclinedField = (askedField === 'phone' || askedField === 'email') && c[askedField] === undefined
+    && !o.proposals.some(proposal => proposal.status === 'pending' && proposal.askedMessageId === last?.id)
+    && briefContactRefusal(message.text) ? askedField : undefined;
   // Normalize only an explicit absence of doubts, keeping its literal evidence.
   const updates = output.updates.filter(update => {
-    if (update.field !== 'questions') return true;
+    if (update.field !== 'questions') {
+      if ((update.field === 'phone' || update.field === 'email') && c[update.field] !== undefined
+        && update.status !== 'answered' && briefContactRefusal(message.text)) return false;
+      return true;
+    }
     if (explicitNoQuestions || resolutionQuote && update.value === noQuestionsValue) return false;
     if (closesPreviousQuestion && previousQuestions && update.value && normalized(update.value) === normalized(previousQuestions)) return false;
     return true;
   }).map(update =>
-    update.field === 'questions' && message.text.includes(update.quote) && noQuestions(update.quote, questionsContext)
+    update.field === 'questions' && message.text.includes(update.quote) && acceptsNoQuestions(update.quote)
       ? { ...update, status: 'answered' as const, value: noQuestionsValue, mode: 'apply' as const }
       : update);
   for (let i = 0; i < updates.length; i++) {
@@ -270,7 +281,8 @@ export function applyUpdates(detail: Detail, output: AgentOutput, message: Messa
   }
   const counts = new Map<string, number>();
   for (const update of updates) counts.set(update.field, (counts.get(update.field) ?? 0) + 1);
-  if (!generic) for (const update of updates) {
+  if (!generic || briefDeclinedField) for (const update of updates) {
+    if (generic && update.field !== briefDeclinedField) continue;
     if ((clarifyTime && update.field === 'timeframe') || clarifyRejection) continue;
     if (counts.get(update.field) !== 1 || !update.quote.trim() || !message.text.includes(update.quote)) rejected.push({ field: update.field, reason: 'INVALID_EVIDENCE' });
     else work.push({ update, sourceId: message.id });
@@ -289,7 +301,9 @@ export function applyUpdates(detail: Detail, output: AgentOutput, message: Messa
   for (const { update: extracted, sourceId, proposal } of work) {
     const update = newQuestion(extracted, resolutionQuote ? previousQuestions : o.answers.questions);
     const { field, status } = update;
-    const validated = validate(update, questionsContext);
+    const validated = update.field === 'questions' && update.value === noQuestionsValue && !acceptsNoQuestions(update.quote)
+      ? { valid: false as const, reason: 'UNSUPPORTED_VALUE' }
+      : validate(update, questionsContext);
     // A separate question or hesitation must not turn an explicit datum into a candidate.
     const evidenceClause = message.text.split(/[;!?¿\n]|\.(?:\s|$)/).find(clause => clause.includes(update.quote)) ?? update.quote;
     const uncertain = field !== 'questions' && (ambiguous(update.quote) || (!proposal && ambiguous(evidenceClause)));
@@ -319,7 +333,7 @@ export function applyUpdates(detail: Detail, output: AgentOutput, message: Messa
     }
     if (status === 'answered' && (field === 'phone' || field === 'email')) checkContact(field, validated.value as string);
     const confirmationRequestedForField = requestedConfirmation && confirmationFields.length === 1 && confirmationFields[0] === field;
-    const explicitAbsence = field === 'questions' && validated.value === noQuestionsValue && noQuestions(update.quote, questionsContext);
+    const explicitAbsence = field === 'questions' && validated.value === noQuestionsValue && acceptsNoQuestions(update.quote);
     if (status === 'answered' && !proposal && !explicitAbsence && (update.mode === 'propose' || uncertain || confirmationRequestedForField)) {
       const candidate: DataProposal = { id: randomUUID(), field, value: update.value!, sourceMessageId: sourceId, quote: update.quote, status: 'pending' };
       o.proposals.push(candidate);
