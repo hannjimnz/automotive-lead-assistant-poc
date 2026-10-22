@@ -1,6 +1,7 @@
 import { z } from "zod";
 import Anthropic from "@anthropic-ai/sdk";
 import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
+import { GoogleGenAI } from "@google/genai";
 
 import {
   catalog,
@@ -405,3 +406,93 @@ export class AnthropicAgent {
     return agentOutputSchema.parse(parsed);
   }
 }
+
+// Anthropic remains available as a provider fallback. Both agents share the
+// same PASA instructions, response contract, and local Zod validation.
+export class GeminiAgent implements ChatAgent {
+  private client: GoogleGenAI | null;
+  private model: string | undefined;
+
+  constructor(options?: { client: GoogleGenAI; model: string }) {
+    if (options) {
+      this.client = options.client;
+      this.model = options.model;
+      return;
+    }
+    const apiKey = process.env.GEMINI_API_KEY?.trim();
+    this.model = process.env.GEMINI_MODEL?.trim() || "gemini-3.5-flash-lite";
+    this.client = apiKey
+      ? new GoogleGenAI({ apiKey, httpOptions: { timeout: 45000 } })
+      : null;
+  }
+
+  get configured(): boolean {
+    return this.client !== null && Boolean(this.model);
+  }
+
+  async respond(context: ChatContext, text: string): Promise<AgentOutput> {
+    if (!this.client || !this.model) {
+      throw new Error("AI_NOT_CONFIGURED");
+    }
+
+    const history = context.messages
+      .filter(message => message.status === "complete")
+      .slice(-24)
+      .map(message => ({
+        role: message.role === "assistant" ? "model" : "user",
+        parts: [{ text: message.text }],
+      }));
+    history.push({ role: "user", parts: [{ text }] });
+
+    const result = await this.client.models.generateContent({
+      model: this.model,
+      contents: history,
+      config: {
+        systemInstruction: buildInstructions(context),
+        maxOutputTokens: 2000,
+        responseMimeType: "application/json",
+        responseJsonSchema: geminiOutputJsonSchema,
+      },
+    });
+
+    if (result.candidates?.[0]?.finishReason === "MAX_TOKENS") {
+      throw new Error("AI_RESPONSE_TRUNCATED");
+    }
+    if (!result.text) throw new Error("AI_RESPONSE_MISSING");
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(result.text);
+    } catch {
+      throw new Error("AI_RESPONSE_INVALID_JSON");
+    }
+    return agentOutputSchema.parse(parsed);
+  }
+}
+
+// Gemini receives a provider-neutral schema. Zod remains the source of truth
+// for full validation, including the local questionFields limit.
+const geminiOutputJsonSchema = {
+  type: "object",
+  properties: {
+    message: { type: "string" },
+    updates: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          field: { type: "string", enum: agentFieldSchema.options },
+          status: { type: "string", enum: ["answered", "unknown", "declined"] },
+          value: { type: ["string", "null"] },
+          quote: { type: "string" },
+          mode: { type: "string", enum: ["apply", "propose"] },
+        },
+        required: ["field", "status", "value", "quote"],
+        additionalProperties: false,
+      },
+    },
+    questionFields: { type: "array", items: { type: "string", enum: agentFieldSchema.options } },
+  },
+  required: ["message", "updates"],
+  additionalProperties: false,
+};

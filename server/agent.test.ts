@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import Anthropic from '@anthropic-ai/sdk';
-import { agentOutputJsonSchema, agentOutputSchema, AnthropicAgent } from './agent.js';
+import { GoogleGenAI } from '@google/genai';
+import { agentOutputJsonSchema, agentOutputSchema, AnthropicAgent, GeminiAgent } from './agent.js';
 import { CRMService, ApiError } from './service.js';
 import { SqliteRepository } from './repository.js';
 
@@ -47,6 +48,41 @@ test('contrato: reproduce maxItems incompatible y conserva todas las validacione
   assert.equal(agentOutputSchema.safeParse({ ...payload, updates: [{ ...payload.updates[0], quote: '' }] }).success, false);
   assert.equal(agentOutputSchema.safeParse({ ...payload, updates: [{ ...payload.updates[0], mode: 'invalid' }] }).success, false);
   assert.equal(agentOutputSchema.safeParse({ ...payload, unexpected: true }).success, false);
+});
+
+test('Gemini reutiliza instrucciones, historial y salida JSON con validación Zod local', async () => {
+  let calls = 0;
+  const client = new GoogleGenAI({
+    apiKey: 'offline-test-placeholder',
+    httpOptions: {
+      fetch: async (_url, init) => {
+        calls++;
+        const body = JSON.parse(String(init?.body));
+        assert.equal(body.systemInstruction.parts[0].text.includes('No sustituyas su elección'), true);
+        assert.equal(body.contents.at(-2).role, 'model');
+        assert.deepEqual(body.contents.at(-2).parts, [{ text: '¿Qué vehículo te interesa?' }]);
+        assert.equal(body.contents.at(-1).role, 'user');
+        assert.equal(body.contents.at(-1).parts[0].text, 'hola soy alexa');
+        assert.equal(body.generationConfig.responseMimeType, 'application/json');
+        assert.equal(body.generationConfig.maxOutputTokens, 2000);
+        assert.equal(body.generationConfig.responseJsonSchema.properties.message.type, 'string');
+        assert.deepEqual(body.generationConfig.responseJsonSchema.required, ['message', 'updates']);
+        assert.equal(body.generationConfig.responseJsonSchema.properties.updates.items.additionalProperties, false);
+        return new Response(JSON.stringify({
+          candidates: [{ content: { role: 'model', parts: [{ text: JSON.stringify(payload) }] }, finishReason: 'STOP' }],
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      },
+    },
+  });
+  const agent = new GeminiAgent({ client, model: 'offline-model' });
+  const output = await agent.respond({
+    contact: {}, answers: {}, collection: {},
+    messages: [{ id: 'previous', conversationId: 'conversation', role: 'assistant', text: '¿Qué vehículo te interesa?', status: 'complete', requestId: 'previous', createdAt: new Date().toISOString() }],
+  }, 'hola soy alexa');
+  assert.equal(output.message, payload.message);
+  assert.equal(output.updates[0].value, 'Alexa');
+  assert.equal(calls, 1);
+  assert.equal(agentOutputSchema.safeParse(output).success, true);
 });
 
 test('hola soy alexa atraviesa SDK, JSON, Zod, actualizaciones y SQLite sin red', async () => {

@@ -10,7 +10,7 @@ import {
   type OpportunityListItem,
 } from "../shared/domain.js";
 
-import { agentFieldSchema, agentOutputSchema, AnthropicAgent, type ChatAgent } from "./agent.js";
+import { agentFieldSchema, agentOutputSchema, GeminiAgent, type ChatAgent } from "./agent.js";
 import { z } from "zod";
 import { phoneSchema } from "../shared/phone.js";
 import { applyUpdates } from "./updates.js";
@@ -37,7 +37,7 @@ export class CRMService {
   readonly followups: Followups;
   private clock: () => Date;
 
-  constructor(repo: Repository, agent: ChatAgent = new AnthropicAgent(), clock: () => Date = () => new Date()) {
+  constructor(repo: Repository, agent: ChatAgent = activeChatAgent, clock: () => Date = () => new Date()) {
     this.repo = repo;
     this.agent = agent;
     this.clock = clock;
@@ -295,6 +295,12 @@ export class CRMService {
     };
   }
 }
+
+// Proveedor activo para la prueba con Gemini.
+const activeChatAgent: ChatAgent = new GeminiAgent();
+// Para volver a Anthropic, comenta Gemini y descomenta estas dos líneas:
+// import { AnthropicAgent } from "./agent.js";
+// const activeChatAgent: ChatAgent = new AnthropicAgent();
 
 function withoutLocalScoring(opportunity: Opportunity): Opportunity {
   return { ...opportunity, score: null, grade: null, ruleVersion: null,
